@@ -724,10 +724,17 @@ public struct PocketTtsSynthesizer {
 
     /// Normalize a text chunk for PocketTTS (matching Python `prepare_text_prompt`).
     static func normalizeText(_ text: String) -> (text: String, framesAfterEos: Int) {
-        var result = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        var result = canonicalizeSmartQuotes(in: text)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
         // Collapse whitespace
         result = result.replacingOccurrences(
             of: "\\s+", with: " ", options: .regularExpression)
+        result = expandSpeakableAbbreviations(in: result)
+
+        var trailingQuotes = ""
+        while result.last == "\"" {
+            trailingQuotes.insert(result.removeLast(), at: trailingQuotes.startIndex)
+        }
 
         // Strip trailing clause punctuation (commas, semicolons, colons)
         // before adding sentence-ending punctuation
@@ -745,6 +752,8 @@ public struct PocketTtsSynthesizer {
         if let last = result.last, !".!?".contains(last) {
             result += "."
         }
+
+        result += trailingQuotes
 
         // Pad short texts for better prosody
         let wordCount = result.split(separator: " ").count
@@ -769,7 +778,8 @@ public struct PocketTtsSynthesizer {
         tokenizer: SentencePieceTokenizer,
         maxTokens: Int = PocketTtsConstants.maxTokensPerChunk
     ) -> [String] {
-        let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalized = canonicalizeSmartQuotes(in: text)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
 
         // If it fits in one chunk, return as-is
         let tokenCount = tokenizer.encode(normalized).count
@@ -873,18 +883,30 @@ public struct PocketTtsSynthesizer {
         var current = ""
         let chars = Array(text)
 
-        for (i, char) in chars.enumerated() {
+        var index = 0
+        while index < chars.count {
+            let char = chars[index]
             current.append(char)
 
-            guard clauseBreaks.contains(char) else { continue }
+            guard clauseBreaks.contains(char) else {
+                index += 1
+                continue
+            }
 
             // Don't split at commas between digits (e.g., "3,500")
             if char == "," {
-                let prevIsDigit = i > 0 && chars[i - 1].isNumber
-                let nextIsDigit = i + 1 < chars.count && chars[i + 1].isNumber
+                let prevIsDigit = index > 0 && chars[index - 1].isNumber
+                let nextIsDigit = index + 1 < chars.count && chars[index + 1].isNumber
                 if prevIsDigit && nextIsDigit {
+                    index += 1
                     continue
                 }
+            }
+
+            index += 1
+            while index < chars.count, chars[index] == "\"" {
+                current.append(chars[index])
+                index += 1
             }
 
             let trimmed = current.trimmingCharacters(in: .whitespaces)
@@ -949,10 +971,15 @@ public struct PocketTtsSynthesizer {
         var current = ""
         let chars = Array(text)
 
-        for (i, char) in chars.enumerated() {
+        var index = 0
+        while index < chars.count {
+            let char = chars[index]
             current.append(char)
 
-            guard ".!?".contains(char) else { continue }
+            guard ".!?".contains(char) else {
+                index += 1
+                continue
+            }
 
             // For periods, check if this is an abbreviation
             if char == "." {
@@ -963,18 +990,27 @@ public struct PocketTtsSynthesizer {
 
                 // Skip if it's a known abbreviation
                 if abbreviations.contains(lastWord.lowercased()) {
+                    index += 1
                     continue
                 }
 
                 // Skip if it's a single uppercase letter (e.g., "J." in initials)
                 if lastWord.count == 1, lastWord.first?.isUppercase == true {
+                    index += 1
                     continue
                 }
 
                 // Skip if followed by a digit (e.g., "3.5")
-                if i + 1 < chars.count, chars[i + 1].isNumber {
+                if index + 1 < chars.count, chars[index + 1].isNumber {
+                    index += 1
                     continue
                 }
+            }
+
+            index += 1
+            while index < chars.count, chars[index] == "\"" {
+                current.append(chars[index])
+                index += 1
             }
 
             let trimmed = current.trimmingCharacters(in: .whitespaces)
@@ -992,6 +1028,34 @@ public struct PocketTtsSynthesizer {
 
         return sentences
     }
+
+    private static func canonicalizeSmartQuotes(in text: String) -> String {
+        String(text.map { character in
+            switch character {
+            case "‘", "’":
+                "'"
+            case "“", "”":
+                "\""
+            default:
+                character
+            }
+        })
+    }
+
+    private static func expandSpeakableAbbreviations(in text: String) -> String {
+        abbreviationExpansions.reduce(text) { partialResult, entry in
+            partialResult.replacingOccurrences(
+                of: entry.pattern,
+                with: entry.replacement,
+                options: .regularExpression
+            )
+        }
+    }
+
+    private static let abbreviationExpansions: [(pattern: String, replacement: String)] = [
+        (#"\bi\.e\.(?=\s|$)"#, "that is"),
+        (#"\be\.g\.(?=\s|$)"#, "for example"),
+    ]
 
     // MARK: - Embedding
 
