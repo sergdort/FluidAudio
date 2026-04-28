@@ -197,10 +197,58 @@ final class PocketTtsStreamingTests: XCTestCase {
         XCTAssertEqual(chunks, ["I've been turning over in my mind ever since"])
     }
 
+    func testTextPlanMatchesExistingChunkTextSynthesisSequence() throws {
+        let text = "“Hello.” “Bye.”"
+        let tokenizer = try makeCharacterTokenizer(for: ["\"Hello.\"", "\"Bye.\""])
+
+        let expectedChunks = PocketTtsSynthesizer.chunkText(text, tokenizer: tokenizer, maxTokens: 10)
+        let plan = PocketTtsSynthesizer.makeTextPlan(text, tokenizer: tokenizer, maxTokens: 10)
+
+        XCTAssertEqual(plan.chunks.map(\.synthesisText), expectedChunks)
+        XCTAssertEqual(plan.chunks.map(\.normalizedText), expectedChunks.map { PocketTtsSynthesizer.normalizeText($0).text })
+    }
+
+    func testTextPlanSourceRangesExtractExactSourceText() throws {
+        let text = "red blue red blue"
+        let tokenizer = try makeCharacterTokenizer(for: [text])
+
+        let plan = PocketTtsSynthesizer.makeTextPlan(text, tokenizer: tokenizer, maxTokens: 8)
+
+        XCTAssertEqual(plan.chunks.map(\.sourceText), ["red", "blue", "red", "blue"])
+        for chunk in plan.chunks {
+            XCTAssertEqual(sourceSubstring(in: plan.originalText, range: chunk.sourceRange), chunk.sourceText)
+        }
+        XCTAssertNotEqual(plan.chunks[0].sourceRange, plan.chunks[2].sourceRange)
+    }
+
+    func testTextPlanKeepsAbbreviationSourceWhileNormalizedTextExpandsIt() throws {
+        let text = "Use i.e. when restating the rule"
+        let tokenizer = try makeCharacterTokenizer(for: [text])
+
+        let plan = PocketTtsSynthesizer.makeTextPlan(text, tokenizer: tokenizer, maxTokens: 100)
+        let chunk = try XCTUnwrap(plan.chunks.first)
+
+        XCTAssertEqual(chunk.sourceText, text)
+        XCTAssertTrue(chunk.normalizedText.contains("that is"))
+        XCTAssertFalse(chunk.normalizedText.contains("i.e."))
+        XCTAssertEqual(sourceSubstring(in: plan.originalText, range: chunk.sourceRange), text)
+    }
+
     private func makeCharacterTokenizer(for texts: [String]) throws -> SentencePieceTokenizer {
         let characters = Set((texts.joined() + Self.spaceMarker).map(String.init))
         let pieces = characters.sorted().map { makePieceMessage(string: $0, score: 0) }
         return try SentencePieceTokenizer(modelData: wrapInModelProto(pieces: pieces))
+    }
+
+    private func sourceSubstring(in text: String, range: PocketTtsSourceRange) -> String? {
+        guard let lowerUTF16 = text.utf16.index(text.utf16.startIndex, offsetBy: range.lowerBound, limitedBy: text.utf16.endIndex),
+              let upperUTF16 = text.utf16.index(text.utf16.startIndex, offsetBy: range.upperBound, limitedBy: text.utf16.endIndex),
+              let lower = String.Index(lowerUTF16, within: text),
+              let upper = String.Index(upperUTF16, within: text) else {
+            return nil
+        }
+
+        return String(text[lower..<upper])
     }
 
     private func makeVarint(_ value: UInt64) -> [UInt8] {

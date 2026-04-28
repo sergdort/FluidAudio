@@ -367,6 +367,57 @@ public struct PocketTtsSynthesizer {
         public let utteranceIndex: Int?
     }
 
+    public struct TextPlan: Sendable, Equatable {
+        public let originalText: String
+        public let chunks: [TextChunk]
+
+        public init(originalText: String, chunks: [TextChunk]) {
+            self.originalText = originalText
+            self.chunks = chunks
+        }
+    }
+
+    public struct TextChunk: Sendable, Equatable, Identifiable {
+        public let id: Int
+        /// UTF-16 offsets into `TextPlan.originalText`.
+        public let sourceRange: SourceRange
+        /// Exact source substring from `TextPlan.originalText`.
+        public let sourceText: String
+        /// Chunk text used by the existing PocketTTS synthesis path before `normalizeText`.
+        public let synthesisText: String
+        /// Exact normalized text passed to tokenization/model input.
+        public let normalizedText: String
+
+        public init(
+            id: Int,
+            sourceRange: SourceRange,
+            sourceText: String,
+            synthesisText: String,
+            normalizedText: String
+        ) {
+            self.id = id
+            self.sourceRange = sourceRange
+            self.sourceText = sourceText
+            self.synthesisText = synthesisText
+            self.normalizedText = normalizedText
+        }
+    }
+
+    public struct SourceRange: Sendable, Equatable {
+        public let lowerBound: Int
+        public let upperBound: Int
+
+        public init(lowerBound: Int, upperBound: Int) {
+            self.lowerBound = lowerBound
+            self.upperBound = upperBound
+        }
+    }
+
+    public enum SessionEvent: Sendable {
+        case utterancePlanned(utteranceIndex: Int, plan: TextPlan)
+        case audioFrame(AudioFrame)
+    }
+
     /// Synthesize audio as a stream of 80ms frames.
     ///
     /// Each frame contains 1920 Float32 samples at 24kHz. Frames are yielded
@@ -831,6 +882,376 @@ public struct PocketTtsSynthesizer {
         return chunks.isEmpty ? [normalized] : chunks
     }
 
+    public static func makeTextPlan(
+        _ text: String,
+        tokenizer: SentencePieceTokenizer,
+        maxTokens: Int = PocketTtsConstants.maxTokensPerChunk
+    ) -> TextPlan {
+        let mappedText = makeMappedCanonicalText(from: text)
+        let mappedChunks = chunkMappedText(mappedText, tokenizer: tokenizer, maxTokens: maxTokens)
+        let chunks = mappedChunks.enumerated().map { index, mappedChunk in
+            let sourceText = sourceSubstring(in: text, range: mappedChunk.sourceRange) ?? ""
+            return TextChunk(
+                id: index,
+                sourceRange: mappedChunk.sourceRange,
+                sourceText: sourceText,
+                synthesisText: mappedChunk.text,
+                normalizedText: normalizeText(mappedChunk.text).text
+            )
+        }
+
+        return TextPlan(originalText: text, chunks: chunks)
+    }
+
+    private static func chunkMappedText(
+        _ text: MappedText,
+        tokenizer: SentencePieceTokenizer,
+        maxTokens: Int
+    ) -> [MappedText] {
+        guard text.text.isEmpty == false else {
+            return []
+        }
+
+        let tokenCount = tokenizer.encode(text.text).count
+        if tokenCount <= maxTokens {
+            return [text]
+        }
+
+        let sentences = splitMappedSentences(text)
+
+        var pieces: [MappedText] = []
+        for sentence in sentences {
+            let sentenceTokens = tokenizer.encode(sentence.text).count
+            if sentenceTokens <= maxTokens {
+                pieces.append(sentence)
+            } else {
+                pieces.append(contentsOf: splitMappedOversizedSentence(sentence, tokenizer: tokenizer, maxTokens: maxTokens))
+            }
+        }
+
+        var chunks: [MappedText] = []
+        var currentChunk: MappedText?
+
+        for piece in pieces {
+            let candidate = currentChunk.map { $0.joined(with: piece) } ?? piece
+            let candidateTokens = tokenizer.encode(candidate.text).count
+            if candidateTokens <= maxTokens {
+                currentChunk = candidate
+            } else {
+                if let currentChunk {
+                    chunks.append(currentChunk)
+                }
+                currentChunk = piece
+            }
+        }
+
+        if let currentChunk {
+            chunks.append(currentChunk)
+        }
+
+        return chunks.isEmpty ? [text] : chunks
+    }
+
+    private struct MappedCharacter {
+        let character: Character
+        let sourceRange: SourceRange
+    }
+
+    private struct MappedText {
+        let characters: [MappedCharacter]
+
+        var text: String {
+            String(characters.map(\.character))
+        }
+
+        var sourceRange: SourceRange {
+            guard let first = characters.first, let last = characters.last else {
+                return SourceRange(lowerBound: 0, upperBound: 0)
+            }
+
+            return SourceRange(
+                lowerBound: first.sourceRange.lowerBound,
+                upperBound: last.sourceRange.upperBound
+            )
+        }
+
+        func trimmed() -> MappedText? {
+            var lowerBound = characters.startIndex
+            var upperBound = characters.endIndex
+
+            while lowerBound < upperBound, characters[lowerBound].character.isWhitespace {
+                lowerBound = characters.index(after: lowerBound)
+            }
+
+            while upperBound > lowerBound, characters[characters.index(before: upperBound)].character.isWhitespace {
+                upperBound = characters.index(before: upperBound)
+            }
+
+            guard lowerBound < upperBound else {
+                return nil
+            }
+
+            return MappedText(characters: Array(characters[lowerBound..<upperBound]))
+        }
+
+        func joined(with next: MappedText) -> MappedText {
+            var joinedCharacters = characters
+            if let previous = characters.last {
+                joinedCharacters.append(MappedCharacter(
+                    character: " ",
+                    sourceRange: SourceRange(
+                        lowerBound: previous.sourceRange.upperBound,
+                        upperBound: previous.sourceRange.upperBound
+                    )
+                ))
+            }
+            joinedCharacters.append(contentsOf: next.characters)
+            return MappedText(characters: joinedCharacters)
+        }
+    }
+
+    private static func makeMappedCanonicalText(from text: String) -> MappedText {
+        var characters: [MappedCharacter] = []
+        var index = text.startIndex
+
+        while index < text.endIndex {
+            let nextIndex = text.index(after: index)
+            let character = text[index]
+            let mappedCharacter: Character
+            switch character {
+            case "‘", "’":
+                mappedCharacter = "'"
+            case "“", "”":
+                mappedCharacter = "\""
+            default:
+                mappedCharacter = character
+            }
+
+            characters.append(MappedCharacter(
+                character: mappedCharacter,
+                sourceRange: SourceRange(
+                    lowerBound: text.utf16.distance(from: text.utf16.startIndex, to: index.samePosition(in: text.utf16)!),
+                    upperBound: text.utf16.distance(from: text.utf16.startIndex, to: nextIndex.samePosition(in: text.utf16)!)
+                )
+            ))
+
+            index = nextIndex
+        }
+
+        return MappedText(characters: characters).trimmed() ?? MappedText(characters: [])
+    }
+
+    private static func sourceSubstring(in text: String, range: SourceRange) -> String? {
+        guard range.lowerBound >= 0,
+              range.upperBound >= range.lowerBound,
+              let lowerUTF16 = text.utf16.index(text.utf16.startIndex, offsetBy: range.lowerBound, limitedBy: text.utf16.endIndex),
+              let upperUTF16 = text.utf16.index(text.utf16.startIndex, offsetBy: range.upperBound, limitedBy: text.utf16.endIndex),
+              let lower = String.Index(lowerUTF16, within: text),
+              let upper = String.Index(upperUTF16, within: text) else {
+            return nil
+        }
+
+        return String(text[lower..<upper])
+    }
+
+    private static func splitMappedOversizedSentence(
+        _ text: MappedText,
+        tokenizer: SentencePieceTokenizer,
+        maxTokens: Int
+    ) -> [MappedText] {
+        let clauseParts = splitMappedAtClauseBoundaries(text)
+        var result: [MappedText] = []
+        var currentPart: MappedText?
+
+        for part in clauseParts {
+            let candidate = currentPart.map { $0.joined(with: part) } ?? part
+            let candidateTokens = tokenizer.encode(candidate.text).count
+
+            if candidateTokens <= maxTokens {
+                currentPart = candidate
+            } else {
+                if let currentPart {
+                    result.append(currentPart)
+                }
+                if tokenizer.encode(part.text).count > maxTokens {
+                    result.append(contentsOf: splitMappedAtWordBoundaries(part, tokenizer: tokenizer, maxTokens: maxTokens))
+                    currentPart = nil
+                } else {
+                    currentPart = part
+                }
+            }
+        }
+
+        if let currentPart {
+            result.append(currentPart)
+        }
+
+        return result.isEmpty ? [text] : result
+    }
+
+    private static func splitMappedAtClauseBoundaries(_ text: MappedText) -> [MappedText] {
+        let clauseBreaks: Set<Character> = [",", ";", ":"]
+        var parts: [MappedText] = []
+        var current: [MappedCharacter] = []
+        let characters = text.characters
+
+        var index = 0
+        while index < characters.count {
+            let mapped = characters[index]
+            current.append(mapped)
+
+            guard clauseBreaks.contains(mapped.character) else {
+                index += 1
+                continue
+            }
+
+            if mapped.character == "," {
+                let previousIsDigit = index > 0 && characters[index - 1].character.isNumber
+                let nextIsDigit = index + 1 < characters.count && characters[index + 1].character.isNumber
+                if previousIsDigit && nextIsDigit {
+                    index += 1
+                    continue
+                }
+            }
+
+            index += 1
+            while index < characters.count, characters[index].character == "\"" {
+                current.append(characters[index])
+                index += 1
+            }
+
+            if let trimmed = MappedText(characters: current).trimmed() {
+                parts.append(trimmed)
+            }
+            current = []
+        }
+
+        if let trimmed = MappedText(characters: current).trimmed() {
+            parts.append(trimmed)
+        }
+
+        return parts
+    }
+
+    private static func splitMappedAtWordBoundaries(
+        _ text: MappedText,
+        tokenizer: SentencePieceTokenizer,
+        maxTokens: Int
+    ) -> [MappedText] {
+        let words = splitMappedWords(text)
+        guard words.count > 1 else { return [text] }
+
+        var chunks: [MappedText] = []
+        var currentWords: [MappedText] = []
+
+        for word in words {
+            let candidate = joinMappedWords(currentWords + [word])
+            let tokens = tokenizer.encode(candidate.text).count
+
+            if tokens > maxTokens && !currentWords.isEmpty {
+                chunks.append(joinMappedWords(currentWords))
+                currentWords = [word]
+            } else {
+                currentWords.append(word)
+            }
+        }
+
+        if !currentWords.isEmpty {
+            chunks.append(joinMappedWords(currentWords))
+        }
+
+        return chunks
+    }
+
+    private static func splitMappedWords(_ text: MappedText) -> [MappedText] {
+        var words: [MappedText] = []
+        var current: [MappedCharacter] = []
+
+        for character in text.characters {
+            if character.character == " " {
+                if current.isEmpty == false {
+                    words.append(MappedText(characters: current))
+                    current = []
+                }
+            } else {
+                current.append(character)
+            }
+        }
+
+        if current.isEmpty == false {
+            words.append(MappedText(characters: current))
+        }
+
+        return words
+    }
+
+    private static func joinMappedWords(_ words: [MappedText]) -> MappedText {
+        guard var result = words.first else {
+            return MappedText(characters: [])
+        }
+
+        for word in words.dropFirst() {
+            result = result.joined(with: word)
+        }
+
+        return result
+    }
+
+    private static func splitMappedSentences(_ text: MappedText) -> [MappedText] {
+        var sentences: [MappedText] = []
+        var current: [MappedCharacter] = []
+        let characters = text.characters
+
+        var index = 0
+        while index < characters.count {
+            let mapped = characters[index]
+            current.append(mapped)
+
+            guard ".!?".contains(mapped.character) else {
+                index += 1
+                continue
+            }
+
+            if mapped.character == "." {
+                let currentText = MappedText(characters: current).text.trimmingCharacters(in: .whitespaces)
+                let withoutPeriod = String(currentText.dropLast())
+                let lastWord = withoutPeriod.split(separator: " ").last.map(String.init) ?? withoutPeriod
+
+                if abbreviations.contains(lastWord.lowercased()) {
+                    index += 1
+                    continue
+                }
+
+                if lastWord.count == 1, lastWord.first?.isUppercase == true {
+                    index += 1
+                    continue
+                }
+
+                if index + 1 < characters.count, characters[index + 1].character.isNumber {
+                    index += 1
+                    continue
+                }
+            }
+
+            index += 1
+            while index < characters.count, characters[index].character == "\"" {
+                current.append(characters[index])
+                index += 1
+            }
+
+            if let trimmed = MappedText(characters: current).trimmed() {
+                sentences.append(trimmed)
+            }
+            current = []
+        }
+
+        if let trimmed = MappedText(characters: current).trimmed() {
+            sentences.append(trimmed)
+        }
+
+        return sentences
+    }
+
     /// Split an oversized sentence to fit within the token limit.
     ///
     /// First tries splitting at clause boundaries (commas, semicolons, colons).
@@ -1133,3 +1554,8 @@ public struct PocketTtsSynthesizer {
     }
 
 }
+
+public typealias PocketTtsTextPlan = PocketTtsSynthesizer.TextPlan
+public typealias PocketTtsTextChunk = PocketTtsSynthesizer.TextChunk
+public typealias PocketTtsSourceRange = PocketTtsSynthesizer.SourceRange
+public typealias PocketTtsSessionEvent = PocketTtsSynthesizer.SessionEvent

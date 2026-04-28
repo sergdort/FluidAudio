@@ -12,6 +12,13 @@ public actor PocketTtsSession {
 
     // MARK: - Public Interface
 
+    /// Stream of text plans and generated audio frames.
+    ///
+    /// Each utterance emits `.utterancePlanned` before any `.audioFrame` for
+    /// that utterance, allowing clients to map audio chunk boundaries back to
+    /// source text without delaying audio playback.
+    public nonisolated let events: AsyncThrowingStream<PocketTtsSynthesizer.SessionEvent, Error>
+
     /// Stream of generated audio frames (80ms / 1920 samples at 24kHz each).
     ///
     /// Frames are yielded as soon as they are generated. The stream completes
@@ -50,6 +57,7 @@ public actor PocketTtsSession {
 
     private nonisolated let textContinuation: AsyncStream<String>.Continuation
     private let textStream: AsyncStream<String>
+    private let eventContinuation: AsyncThrowingStream<PocketTtsSynthesizer.SessionEvent, Error>.Continuation
     private let frameContinuation: AsyncThrowingStream<PocketTtsSynthesizer.AudioFrame, Error>.Continuation
     private var generationTask: Task<Void, Never>?
 
@@ -100,10 +108,15 @@ public actor PocketTtsSession {
         self.textStream = textStream
         self.textContinuation = textContinuation
 
-        // Frame output stream
+        // Event and frame output streams
+        let (events, eventContinuation) = AsyncThrowingStream.makeStream(
+            of: PocketTtsSynthesizer.SessionEvent.self
+        )
         let (frames, frameContinuation) = AsyncThrowingStream.makeStream(
             of: PocketTtsSynthesizer.AudioFrame.self
         )
+        self.events = events
+        self.eventContinuation = eventContinuation
         self.frames = frames
         self.frameContinuation = frameContinuation
     }
@@ -115,6 +128,10 @@ public actor PocketTtsSession {
             await self.generateLoop()
         }
         frameContinuation.onTermination = { [weak self] _ in
+            guard let self else { return }
+            Task { await self.cancel() }
+        }
+        eventContinuation.onTermination = { [weak self] _ in
             guard let self else { return }
             Task { await self.cancel() }
         }
@@ -132,37 +149,44 @@ public actor PocketTtsSession {
                 let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !trimmed.isEmpty else { continue }
 
-                let chunks = PocketTtsSynthesizer.chunkText(
+                let plan = PocketTtsSynthesizer.makeTextPlan(
                     trimmed, tokenizer: constants.tokenizer
                 )
+                let chunks = plan.chunks
                 Self.logger.info(
                     "Session enqueued '\(trimmed)', \(chunks.count) chunk(s)")
+                eventContinuation.yield(.utterancePlanned(utteranceIndex: utteranceIndex, plan: plan))
 
-                for (chunkIndex, chunkText) in chunks.enumerated() {
+                for chunk in chunks {
                     if Task.isCancelled { break }
 
                     try await generateChunk(
-                        text: chunkText,
-                        chunkIndex: chunkIndex,
+                        text: chunk.synthesisText,
+                        normalizedText: chunk.normalizedText,
+                        chunkIndex: chunk.id,
                         chunkCount: chunks.count,
                         utteranceIndex: utteranceIndex
                     )
                 }
                 utteranceIndex += 1
             }
+            eventContinuation.finish()
             frameContinuation.finish()
         } catch {
+            eventContinuation.finish(throwing: error)
             frameContinuation.finish(throwing: error)
         }
     }
 
     private func generateChunk(
         text: String,
+        normalizedText: String,
         chunkIndex: Int,
         chunkCount: Int,
         utteranceIndex: Int
     ) async throws {
-        let (normalizedChunk, framesAfterEos) = PocketTtsSynthesizer.normalizeText(text)
+        let framesAfterEos = PocketTtsSynthesizer.normalizeText(text).framesAfterEos
+        let normalizedChunk = normalizedText
         Self.logger.info("Session chunk \(chunkIndex): '\(normalizedChunk)'")
 
         // Tokenize and embed
@@ -224,15 +248,15 @@ public actor PocketTtsSession {
             mimiState = localMimi
 
             // Yield frame
-            frameContinuation.yield(
-                PocketTtsSynthesizer.AudioFrame(
-                    samples: frameSamples,
-                    frameIndex: step,
-                    chunkIndex: chunkIndex,
-                    chunkCount: chunkCount,
-                    utteranceIndex: utteranceIndex
-                )
+            let frame = PocketTtsSynthesizer.AudioFrame(
+                samples: frameSamples,
+                frameIndex: step,
+                chunkIndex: chunkIndex,
+                chunkCount: chunkCount,
+                utteranceIndex: utteranceIndex
             )
+            frameContinuation.yield(frame)
+            eventContinuation.yield(.audioFrame(frame))
 
             // Autoregressive feedback
             sequence = try PocketTtsSynthesizer.createSequenceFromLatent(latent)
