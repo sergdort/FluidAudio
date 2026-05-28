@@ -7,7 +7,6 @@ import Foundation
 /// then each enqueued utterance only pays the text prefill cost. Mimi decoder
 /// state persists across utterances for seamless audio continuity.
 public actor PocketTtsSession {
-
     private static let logger = AppLogger(category: "PocketTtsSession")
 
     // MARK: - Public Interface
@@ -101,7 +100,7 @@ public actor PocketTtsSession {
         self.mimiModel = mimiModel
         self.bosEmb = bosEmb
         self.temperature = temperature
-        self.rng = SeededRNG(seed: seed)
+        rng = SeededRNG(seed: seed)
 
         // Text queue channel
         let (textStream, textContinuation) = AsyncStream.makeStream(of: String.self)
@@ -154,7 +153,8 @@ public actor PocketTtsSession {
                 )
                 let chunks = plan.chunks
                 Self.logger.info(
-                    "Session enqueued '\(trimmed)', \(chunks.count) chunk(s)")
+                    "Session enqueued '\(trimmed)', \(chunks.count) chunk(s)"
+                )
                 eventContinuation.yield(.utterancePlanned(utteranceIndex: utteranceIndex, plan: plan))
 
                 for chunk in chunks {
@@ -205,7 +205,7 @@ public actor PocketTtsSession {
         var sequence = try PocketTtsSynthesizer.createNaNSequence()
         let totalFramesAfterEos = framesAfterEos + PocketTtsConstants.extraFramesAfterDetection
 
-        for step in 0..<maxGenLen {
+        for step in 0 ..< maxGenLen {
             if Task.isCancelled { break }
 
             // FlowLM step with local KV cache copy-in/copy-out
@@ -219,7 +219,7 @@ public actor PocketTtsSession {
             kvState = localKV
 
             // EOS detection
-            if eosLogit > PocketTtsConstants.eosThreshold && eosStep == nil {
+            if eosLogit > PocketTtsConstants.eosThreshold, eosStep == nil {
                 eosStep = step
                 Self.logger.info("Session chunk \(chunkIndex) EOS at step \(step)")
             }
@@ -255,7 +255,8 @@ public actor PocketTtsSession {
                 chunkCount: chunkCount,
                 utteranceIndex: utteranceIndex
             )
-            frameContinuation.yield(frame)
+            // Oratio consumes `events`; yielding the same sample arrays into
+            // the legacy `frames` stream can retain an unbounded unused buffer.
             eventContinuation.yield(.audioFrame(frame))
 
             // Autoregressive feedback
