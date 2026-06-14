@@ -161,9 +161,7 @@ public actor PocketTtsSession {
                     if Task.isCancelled { break }
 
                     try await generateChunk(
-                        text: chunk.synthesisText,
-                        normalizedText: chunk.normalizedText,
-                        chunkIndex: chunk.id,
+                        chunk: chunk,
                         chunkCount: chunks.count,
                         utteranceIndex: utteranceIndex
                     )
@@ -179,15 +177,13 @@ public actor PocketTtsSession {
     }
 
     private func generateChunk(
-        text: String,
-        normalizedText: String,
-        chunkIndex: Int,
+        chunk: PocketTtsSynthesizer.TextChunk,
         chunkCount: Int,
         utteranceIndex: Int
     ) async throws {
-        let framesAfterEos = PocketTtsSynthesizer.normalizeText(text).framesAfterEos
-        let normalizedChunk = normalizedText
-        Self.logger.info("Session chunk \(chunkIndex): '\(normalizedChunk)'")
+        let framesAfterEos = PocketTtsSynthesizer.normalizeText(chunk.synthesisText).framesAfterEos
+        let normalizedChunk = chunk.normalizedText
+        Self.logger.info("Session chunk \(chunk.id): '\(normalizedChunk)'")
 
         // Tokenize and embed
         let tokenIds = constants.tokenizer.encode(normalizedChunk)
@@ -200,10 +196,11 @@ public actor PocketTtsSession {
         )
 
         // Generation loop
-        let maxGenLen = PocketTtsSynthesizer.estimateMaxFrames(text: text)
+        let maxGenLen = PocketTtsSynthesizer.estimateMaxFrames(text: chunk.synthesisText)
         var eosStep: Int?
         var sequence = try PocketTtsSynthesizer.createNaNSequence()
         let totalFramesAfterEos = framesAfterEos + PocketTtsConstants.extraFramesAfterDetection
+        var generatedSampleCount = 0
 
         for step in 0 ..< maxGenLen {
             if Task.isCancelled { break }
@@ -221,7 +218,7 @@ public actor PocketTtsSession {
             // EOS detection
             if eosLogit > PocketTtsConstants.eosThreshold, eosStep == nil {
                 eosStep = step
-                Self.logger.info("Session chunk \(chunkIndex) EOS at step \(step)")
+                Self.logger.info("Session chunk \(chunk.id) EOS at step \(step)")
             }
             if let eos = eosStep, step >= eos + totalFramesAfterEos {
                 break
@@ -251,16 +248,28 @@ public actor PocketTtsSession {
             let frame = PocketTtsSynthesizer.AudioFrame(
                 samples: frameSamples,
                 frameIndex: step,
-                chunkIndex: chunkIndex,
+                chunkIndex: chunk.id,
                 chunkCount: chunkCount,
                 utteranceIndex: utteranceIndex
             )
+            generatedSampleCount += frameSamples.count
             // Oratio consumes `events`; yielding the same sample arrays into
             // the legacy `frames` stream can retain an unbounded unused buffer.
             eventContinuation.yield(.audioFrame(frame))
 
             // Autoregressive feedback
             sequence = try PocketTtsSynthesizer.createSequenceFromLatent(latent)
+        }
+
+        let audioDuration = TimeInterval(generatedSampleCount) / TimeInterval(PocketTtsConstants.audioSampleRate)
+        let spans = PocketTtsSynthesizer.estimatedHighlightSpans(for: chunk, audioDuration: audioDuration)
+        if spans.isEmpty == false {
+            eventContinuation.yield(.chunkHighlights(
+                utteranceIndex: utteranceIndex,
+                chunkIndex: chunk.id,
+                audioDuration: audioDuration,
+                spans: spans
+            ))
         }
     }
 }

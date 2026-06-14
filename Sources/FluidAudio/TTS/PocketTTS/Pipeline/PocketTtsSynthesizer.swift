@@ -11,8 +11,7 @@ import OSLog
 /// to stay within the KV cache limit (512 positions).
 ///
 /// Pipeline: text → chunk → [tokenize → embed → prefill KV → generate → flow decode → mimi decode] → WAV
-public struct PocketTtsSynthesizer {
-
+public enum PocketTtsSynthesizer {
     static let logger = AppLogger(category: "PocketTtsSynthesizer")
 
     private enum Context {
@@ -31,7 +30,8 @@ public struct PocketTtsSynthesizer {
     static func currentModelStore() throws -> PocketTtsModelStore {
         guard let store = Context.modelStore else {
             throw PocketTTSError.processingFailed(
-                "PocketTtsSynthesizer requires a model store context.")
+                "PocketTtsSynthesizer requires a model store context."
+            )
         }
         return store
     }
@@ -67,7 +67,7 @@ public struct PocketTtsSynthesizer {
         logger.info("Split into \(chunks.count) chunk(s)")
 
         // 3. Set up random number generator (seeded or system entropy)
-        var rng = SeededRNG(seed: seed ?? UInt64.random(in: 0...UInt64.max))
+        var rng = SeededRNG(seed: seed ?? UInt64.random(in: 0 ... UInt64.max))
 
         // 4. Load models
         let condModel = try await store.condStep()
@@ -115,7 +115,7 @@ public struct PocketTtsSynthesizer {
             let totalFramesAfterEos =
                 framesAfterEos + PocketTtsConstants.extraFramesAfterDetection
 
-            for step in 0..<maxGenLen {
+            for step in 0 ..< maxGenLen {
                 let (transformerOut, eosLogit) = try await runFlowLMStep(
                     sequence: sequence,
                     bosEmb: bosEmb,
@@ -160,7 +160,8 @@ public struct PocketTtsSynthesizer {
 
         let genElapsed = Date().timeIntervalSince(genStart)
         logger.info(
-            "Generated \(audioChunks.count) frames in \(String(format: "%.2f", genElapsed))s")
+            "Generated \(audioChunks.count) frames in \(String(format: "%.2f", genElapsed))s"
+        )
 
         // 8. Concatenate audio (no peak normalization — preserve natural levels)
         var allSamples = audioChunks.flatMap { $0 }
@@ -222,7 +223,7 @@ public struct PocketTtsSynthesizer {
         logger.info("Split into \(chunks.count) chunk(s)")
 
         // 3. Set up random number generator (seeded or system entropy)
-        var rng = SeededRNG(seed: seed ?? UInt64.random(in: 0...UInt64.max))
+        var rng = SeededRNG(seed: seed ?? UInt64.random(in: 0 ... UInt64.max))
 
         // 4. Load models
         let condModel = try await store.condStep()
@@ -270,7 +271,7 @@ public struct PocketTtsSynthesizer {
             let totalFramesAfterEos =
                 framesAfterEos + PocketTtsConstants.extraFramesAfterDetection
 
-            for step in 0..<maxGenLen {
+            for step in 0 ..< maxGenLen {
                 let (transformerOut, eosLogit) = try await runFlowLMStep(
                     sequence: sequence,
                     bosEmb: bosEmb,
@@ -316,7 +317,8 @@ public struct PocketTtsSynthesizer {
 
         let genElapsed = Date().timeIntervalSince(genStart)
         logger.info(
-            "Generated \(audioChunks.count) frames in \(String(format: "%.2f", genElapsed))s")
+            "Generated \(audioChunks.count) frames in \(String(format: "%.2f", genElapsed))s"
+        )
 
         // 8. Concatenate audio (no peak normalization — preserve natural levels)
         var allSamples = audioChunks.flatMap { $0 }
@@ -367,57 +369,6 @@ public struct PocketTtsSynthesizer {
         public let utteranceIndex: Int?
     }
 
-    public struct TextPlan: Sendable, Equatable {
-        public let originalText: String
-        public let chunks: [TextChunk]
-
-        public init(originalText: String, chunks: [TextChunk]) {
-            self.originalText = originalText
-            self.chunks = chunks
-        }
-    }
-
-    public struct TextChunk: Sendable, Equatable, Identifiable {
-        public let id: Int
-        /// UTF-16 offsets into `TextPlan.originalText`.
-        public let sourceRange: SourceRange
-        /// Exact source substring from `TextPlan.originalText`.
-        public let sourceText: String
-        /// Chunk text used by the existing PocketTTS synthesis path before `normalizeText`.
-        public let synthesisText: String
-        /// Exact normalized text passed to tokenization/model input.
-        public let normalizedText: String
-
-        public init(
-            id: Int,
-            sourceRange: SourceRange,
-            sourceText: String,
-            synthesisText: String,
-            normalizedText: String
-        ) {
-            self.id = id
-            self.sourceRange = sourceRange
-            self.sourceText = sourceText
-            self.synthesisText = synthesisText
-            self.normalizedText = normalizedText
-        }
-    }
-
-    public struct SourceRange: Sendable, Equatable {
-        public let lowerBound: Int
-        public let upperBound: Int
-
-        public init(lowerBound: Int, upperBound: Int) {
-            self.lowerBound = lowerBound
-            self.upperBound = upperBound
-        }
-    }
-
-    public enum SessionEvent: Sendable {
-        case utterancePlanned(utteranceIndex: Int, plan: TextPlan)
-        case audioFrame(AudioFrame)
-    }
-
     /// Synthesize audio as a stream of 80ms frames.
     ///
     /// Each frame contains 1920 Float32 samples at 24kHz. Frames are yielded
@@ -459,7 +410,7 @@ public struct PocketTtsSynthesizer {
         let repoDir = try await store.repoDir()
         let mimiInitialState = try loadMimiInitialState(from: repoDir)
         let bosEmb = try createBosEmbedding(constants.bosEmbedding)
-        let seedValue = seed ?? UInt64.random(in: 0...UInt64.max)
+        let seedValue = seed ?? UInt64.random(in: 0 ... UInt64.max)
         let chunkCount = chunks.count
 
         logger.info("Streaming \(chunkCount) chunk(s)")
@@ -512,7 +463,7 @@ public struct PocketTtsSynthesizer {
         let repoDir = try await store.repoDir()
         let mimiInitialState = try loadMimiInitialState(from: repoDir)
         let bosEmb = try createBosEmbedding(constants.bosEmbedding)
-        let seedValue = seed ?? UInt64.random(in: 0...UInt64.max)
+        let seedValue = seed ?? UInt64.random(in: 0 ... UInt64.max)
         let chunkCount = chunks.count
 
         let generator = StreamingGenerator(
@@ -556,7 +507,7 @@ public struct PocketTtsSynthesizer {
         let repoDir = try await store.repoDir()
         let mimiState = try loadMimiInitialState(from: repoDir)
         let bosEmb = try createBosEmbedding(constants.bosEmbedding)
-        let seedValue = seed ?? UInt64.random(in: 0...UInt64.max)
+        let seedValue = seed ?? UInt64.random(in: 0 ... UInt64.max)
 
         // One-time voice prefill
         let emptyState = try emptyKVCacheState()
@@ -626,9 +577,9 @@ public struct PocketTtsSynthesizer {
             self.stepModel = stepModel
             self.flowModel = flowModel
             self.mimiModel = mimiModel
-            self.mimiState = mimiInitialState
+            mimiState = mimiInitialState
             self.bosEmb = bosEmb
-            self.rng = SeededRNG(seed: seedValue)
+            rng = SeededRNG(seed: seedValue)
             self.chunkCount = chunkCount
             self.temperature = temperature
         }
@@ -696,7 +647,8 @@ public struct PocketTtsSynthesizer {
 
                     let tokenIds = constants.tokenizer.encode(normalizedChunk)
                     let textEmbeddings = PocketTtsSynthesizer.embedTokens(
-                        tokenIds, constants: constants)
+                        tokenIds, constants: constants
+                    )
 
                     var kvState = try await PocketTtsSynthesizer.prefillKVCache(
                         voiceData: voiceData,
@@ -710,7 +662,7 @@ public struct PocketTtsSynthesizer {
                     let totalFramesAfterEos =
                         framesAfterEos + PocketTtsConstants.extraFramesAfterDetection
 
-                    for step in 0..<maxGenLen {
+                    for step in 0 ..< maxGenLen {
                         if Task.isCancelled { break }
 
                         let (transformerOut, eosLogit) = try await flowLMStep(
@@ -718,10 +670,11 @@ public struct PocketTtsSynthesizer {
                             kvState: &kvState
                         )
 
-                        if eosLogit > PocketTtsConstants.eosThreshold && eosStep == nil {
+                        if eosLogit > PocketTtsConstants.eosThreshold, eosStep == nil {
                             eosStep = step
                             PocketTtsSynthesizer.logger.info(
-                                "Stream chunk \(chunkIdx + 1) EOS at step \(step)")
+                                "Stream chunk \(chunkIdx + 1) EOS at step \(step)"
+                            )
                         }
                         if let eos = eosStep, step >= eos + totalFramesAfterEos {
                             break
@@ -740,7 +693,8 @@ public struct PocketTtsSynthesizer {
                                 chunkIndex: chunkIdx,
                                 chunkCount: chunkCount,
                                 utteranceIndex: nil
-                            ))
+                            )
+                        )
 
                         sequence = try PocketTtsSynthesizer.createSequenceFromLatent(latent)
                     }
@@ -773,13 +727,108 @@ public struct PocketTtsSynthesizer {
 
     // MARK: - Text Processing
 
+    public struct TextPlan: Sendable, Equatable {
+        public let originalText: String
+        public let chunks: [TextChunk]
+
+        public init(originalText: String, chunks: [TextChunk]) {
+            self.originalText = originalText
+            self.chunks = chunks
+        }
+    }
+
+    public struct TextChunk: Sendable, Equatable, Identifiable {
+        public let id: Int
+        /// UTF-16 offsets into `TextPlan.originalText`.
+        public let sourceRange: SourceRange
+        /// Exact source substring from `TextPlan.originalText`.
+        public let sourceText: String
+        /// Chunk text used by the PocketTTS synthesis path before `normalizeText`.
+        public let synthesisText: String
+        /// Exact normalized text passed to tokenization/model input.
+        public let normalizedText: String
+        /// Source words in this chunk, using UTF-16 offsets into `TextPlan.originalText`.
+        public let words: [TextPlanWord]
+
+        public init(
+            id: Int,
+            sourceRange: SourceRange,
+            sourceText: String,
+            synthesisText: String,
+            normalizedText: String,
+            words: [TextPlanWord] = []
+        ) {
+            self.id = id
+            self.sourceRange = sourceRange
+            self.sourceText = sourceText
+            self.synthesisText = synthesisText
+            self.normalizedText = normalizedText
+            self.words = words
+        }
+    }
+
+    public struct TextPlanWord: Sendable, Equatable, Identifiable {
+        public let id: Int
+        /// UTF-16 offsets into `TextPlan.originalText`.
+        public let sourceRange: SourceRange
+        /// Exact source substring from `TextPlan.originalText`.
+        public let sourceText: String
+        /// Normalized word text used for timing estimation.
+        public let normalizedText: String
+
+        public init(id: Int, sourceRange: SourceRange, sourceText: String, normalizedText: String) {
+            self.id = id
+            self.sourceRange = sourceRange
+            self.sourceText = sourceText
+            self.normalizedText = normalizedText
+        }
+    }
+
+    public struct HighlightSpan: Sendable, Equatable, Identifiable {
+        public enum Style: Sendable, Equatable {
+            case word
+            case reading
+        }
+
+        public let id: Int
+        public let style: Style
+        public let sourceRange: SourceRange
+        public let startTime: TimeInterval
+        public let endTime: TimeInterval
+
+        public init(id: Int, style: Style, sourceRange: SourceRange, startTime: TimeInterval, endTime: TimeInterval) {
+            self.id = id
+            self.style = style
+            self.sourceRange = sourceRange
+            self.startTime = startTime
+            self.endTime = endTime
+        }
+    }
+
+    public struct SourceRange: Sendable, Equatable {
+        public let lowerBound: Int
+        public let upperBound: Int
+
+        public init(lowerBound: Int, upperBound: Int) {
+            self.lowerBound = lowerBound
+            self.upperBound = upperBound
+        }
+    }
+
+    public enum SessionEvent: Sendable {
+        case utterancePlanned(utteranceIndex: Int, plan: TextPlan)
+        case audioFrame(AudioFrame)
+        case chunkHighlights(utteranceIndex: Int, chunkIndex: Int, audioDuration: TimeInterval, spans: [HighlightSpan])
+    }
+
     /// Normalize a text chunk for PocketTTS (matching Python `prepare_text_prompt`).
     static func normalizeText(_ text: String) -> (text: String, framesAfterEos: Int) {
         var result = canonicalizeSmartQuotes(in: text)
             .trimmingCharacters(in: .whitespacesAndNewlines)
         // Collapse whitespace
         result = result.replacingOccurrences(
-            of: "\\s+", with: " ", options: .regularExpression)
+            of: "\\s+", with: " ", options: .regularExpression
+        )
         result = expandSpeakableAbbreviations(in: result)
 
         var trailingQuotes = ""
@@ -891,12 +940,21 @@ public struct PocketTtsSynthesizer {
         let mappedChunks = chunkMappedText(mappedText, tokenizer: tokenizer, maxTokens: maxTokens)
         let chunks = mappedChunks.enumerated().map { index, mappedChunk in
             let sourceText = sourceSubstring(in: text, range: mappedChunk.sourceRange) ?? ""
+            let words = splitMappedWords(mappedChunk).enumerated().map { wordIndex, word in
+                TextPlanWord(
+                    id: wordIndex,
+                    sourceRange: word.sourceRange,
+                    sourceText: sourceSubstring(in: text, range: word.sourceRange) ?? "",
+                    normalizedText: word.text
+                )
+            }
             return TextChunk(
                 id: index,
                 sourceRange: mappedChunk.sourceRange,
                 sourceText: sourceText,
                 synthesisText: mappedChunk.text,
-                normalizedText: normalizeText(mappedChunk.text).text
+                normalizedText: normalizeText(mappedChunk.text).text,
+                words: words
             )
         }
 
@@ -952,6 +1010,53 @@ public struct PocketTtsSynthesizer {
         return chunks.isEmpty ? [text] : chunks
     }
 
+    public static func estimatedHighlightSpans(
+        for chunk: TextChunk,
+        audioDuration: TimeInterval
+    ) -> [HighlightSpan] {
+        guard audioDuration > 0, chunk.words.isEmpty == false else {
+            return []
+        }
+
+        let weights = chunk.words.map { word in
+            max(1.0, Double(word.normalizedText.filter { $0.isWhitespace == false }.count))
+        }
+        let totalWeight = weights.reduce(0, +)
+        guard totalWeight > 0 else { return [] }
+
+        var spans: [HighlightSpan] = []
+        spans.reserveCapacity(chunk.words.count * 2)
+
+        var elapsed: TimeInterval = 0
+        for (index, word) in chunk.words.enumerated() {
+            let startTime = elapsed
+            let duration = index == chunk.words.indices.last ? audioDuration - elapsed : audioDuration * weights[index] / totalWeight
+            let endTime = min(audioDuration, startTime + max(0, duration))
+
+            spans.append(HighlightSpan(
+                id: spans.count,
+                style: .word,
+                sourceRange: word.sourceRange,
+                startTime: startTime,
+                endTime: endTime
+            ))
+            spans.append(HighlightSpan(
+                id: spans.count,
+                style: .reading,
+                sourceRange: SourceRange(
+                    lowerBound: chunk.words[0].sourceRange.lowerBound,
+                    upperBound: word.sourceRange.upperBound
+                ),
+                startTime: startTime,
+                endTime: endTime
+            ))
+
+            elapsed = endTime
+        }
+
+        return spans
+    }
+
     private struct MappedCharacter {
         let character: Character
         let sourceRange: SourceRange
@@ -991,7 +1096,7 @@ public struct PocketTtsSynthesizer {
                 return nil
             }
 
-            return MappedText(characters: Array(characters[lowerBound..<upperBound]))
+            return MappedText(characters: Array(characters[lowerBound ..< upperBound]))
         }
 
         func joined(with next: MappedText) -> MappedText {
@@ -1047,11 +1152,12 @@ public struct PocketTtsSynthesizer {
               let lowerUTF16 = text.utf16.index(text.utf16.startIndex, offsetBy: range.lowerBound, limitedBy: text.utf16.endIndex),
               let upperUTF16 = text.utf16.index(text.utf16.startIndex, offsetBy: range.upperBound, limitedBy: text.utf16.endIndex),
               let lower = String.Index(lowerUTF16, within: text),
-              let upper = String.Index(upperUTF16, within: text) else {
+              let upper = String.Index(upperUTF16, within: text)
+        else {
             return nil
         }
 
-        return String(text[lower..<upper])
+        return String(text[lower ..< upper])
     }
 
     private static func splitMappedOversizedSentence(
@@ -1108,7 +1214,7 @@ public struct PocketTtsSynthesizer {
             if mapped.character == "," {
                 let previousIsDigit = index > 0 && characters[index - 1].character.isNumber
                 let nextIsDigit = index + 1 < characters.count && characters[index + 1].character.isNumber
-                if previousIsDigit && nextIsDigit {
+                if previousIsDigit, nextIsDigit {
                     index += 1
                     continue
                 }
@@ -1148,7 +1254,7 @@ public struct PocketTtsSynthesizer {
             let candidate = joinMappedWords(currentWords + [word])
             let tokens = tokenizer.encode(candidate.text).count
 
-            if tokens > maxTokens && !currentWords.isEmpty {
+            if tokens > maxTokens, !currentWords.isEmpty {
                 chunks.append(joinMappedWords(currentWords))
                 currentWords = [word]
             } else {
@@ -1318,7 +1424,7 @@ public struct PocketTtsSynthesizer {
             if char == "," {
                 let prevIsDigit = index > 0 && chars[index - 1].isNumber
                 let nextIsDigit = index + 1 < chars.count && chars[index + 1].isNumber
-                if prevIsDigit && nextIsDigit {
+                if prevIsDigit, nextIsDigit {
                     index += 1
                     continue
                 }
@@ -1361,7 +1467,7 @@ public struct PocketTtsSynthesizer {
             let candidate = (currentWords + [word]).joined(separator: " ")
             let tokens = tokenizer.encode(candidate).count
 
-            if tokens > maxTokens && !currentWords.isEmpty {
+            if tokens > maxTokens, !currentWords.isEmpty {
                 chunks.append(currentWords.joined(separator: " "))
                 currentWords = [word]
             } else {
@@ -1491,10 +1597,10 @@ public struct PocketTtsSynthesizer {
                 logger.warning("Token ID \(id) out of range [0, \(vocabSize)), clamping")
                 let clampedId = min(max(id, 0), vocabSize - 1)
                 let offset = clampedId * dim
-                return Array(constants.textEmbedTable[offset..<(offset + dim)])
+                return Array(constants.textEmbedTable[offset ..< (offset + dim)])
             }
             let offset = id * dim
-            return Array(constants.textEmbedTable[offset..<(offset + dim)])
+            return Array(constants.textEmbedTable[offset ..< (offset + dim)])
         }
     }
 
@@ -1529,9 +1635,10 @@ public struct PocketTtsSynthesizer {
     static func createNaNSequence() throws -> MLMultiArray {
         let dim = PocketTtsConstants.latentDim
         let array = try MLMultiArray(
-            shape: [1, 1, NSNumber(value: dim)], dataType: .float32)
+            shape: [1, 1, NSNumber(value: dim)], dataType: .float32
+        )
         let ptr = array.dataPointer.bindMemory(to: Float.self, capacity: dim)
-        for i in 0..<dim {
+        for i in 0 ..< dim {
             ptr[i] = .nan
         }
         return array
@@ -1544,7 +1651,8 @@ public struct PocketTtsSynthesizer {
     static func createSequenceFromLatent(_ latent: [Float]) throws -> MLMultiArray {
         let dim = PocketTtsConstants.latentDim
         let array = try MLMultiArray(
-            shape: [1, 1, NSNumber(value: dim)], dataType: .float32)
+            shape: [1, 1, NSNumber(value: dim)], dataType: .float32
+        )
         let ptr = array.dataPointer.bindMemory(to: Float.self, capacity: dim)
         latent.withUnsafeBufferPointer { buffer in
             guard let base = buffer.baseAddress else { return }
@@ -1552,10 +1660,11 @@ public struct PocketTtsSynthesizer {
         }
         return array
     }
-
 }
 
 public typealias PocketTtsTextPlan = PocketTtsSynthesizer.TextPlan
 public typealias PocketTtsTextChunk = PocketTtsSynthesizer.TextChunk
+public typealias PocketTtsTextPlanWord = PocketTtsSynthesizer.TextPlanWord
 public typealias PocketTtsSourceRange = PocketTtsSynthesizer.SourceRange
+public typealias PocketTtsHighlightSpan = PocketTtsSynthesizer.HighlightSpan
 public typealias PocketTtsSessionEvent = PocketTtsSynthesizer.SessionEvent
