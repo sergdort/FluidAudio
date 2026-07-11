@@ -763,6 +763,24 @@ public struct PocketTtsSynthesizer {
             .replacingOccurrences(of: "\u{201D}", with: "\"")
     }
 
+    /// Expand written-only abbreviations into their spoken form so the
+    /// synthesizer voices them naturally instead of spelling the letters.
+    /// Only whole-token matches at word boundaries are replaced.
+    static func expandSpeakableAbbreviations(in text: String) -> String {
+        abbreviationExpansions.reduce(text) { partialResult, entry in
+            partialResult.replacingOccurrences(
+                of: entry.pattern,
+                with: entry.replacement,
+                options: .regularExpression
+            )
+        }
+    }
+
+    static let abbreviationExpansions: [(pattern: String, replacement: String)] = [
+        (#"\bi\.e\.(?=\s|$)"#, "that is"),
+        (#"\be\.g\.(?=\s|$)"#, "for example"),
+    ]
+
     /// Language-specific pre-normalization applied before the shared
     /// smart-quote pass.
     ///
@@ -816,8 +834,19 @@ public struct PocketTtsSynthesizer {
         // Collapse whitespace
         result = result.replacingOccurrences(
             of: "\\s+", with: " ", options: .regularExpression)
+        // Expand speakable abbreviations (e.g. "i.e." -> "that is") so the
+        // synthesizer voices them instead of spelling the letters.
+        result = expandSpeakableAbbreviations(in: result)
 
         if !isMidSentence {
+            // Detach any trailing closing quotes so clause-punctuation
+            // stripping and terminal-punctuation detection act on the sentence
+            // body (e.g. `"He left."` must not gain a second period).
+            var trailingQuotes = ""
+            while result.last == "\"" {
+                trailingQuotes.insert(result.removeLast(), at: trailingQuotes.startIndex)
+            }
+
             // Strip trailing clause punctuation (commas, semicolons, colons)
             // before adding sentence-ending punctuation
             while let last = result.last, ",;:".contains(last) {
@@ -830,8 +859,16 @@ public struct PocketTtsSynthesizer {
                 result = first.uppercased() + result.dropFirst()
             }
 
-            // Add period if no terminal punctuation
-            if let last = result.last, !".!?".contains(last) {
+            // Whether the sentence body already ends with terminal punctuation
+            // (checked before re-attaching the closing quotes).
+            let endsWithTerminal = result.last.map { ".!?".contains($0) } ?? false
+
+            // Re-attach the closing quotes, then add a period after them only
+            // if the body wasn't already terminal. This keeps upstream's
+            // period-after-quote convention (`"bonjour".`) while avoiding a
+            // doubled period when the quote already closed a sentence (`."`).
+            result += trailingQuotes
+            if !endsWithTerminal {
                 result += "."
             }
         }

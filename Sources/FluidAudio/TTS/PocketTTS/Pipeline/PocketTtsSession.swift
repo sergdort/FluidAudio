@@ -12,11 +12,23 @@ public actor PocketTtsSession {
 
     // MARK: - Public Interface
 
+    /// Stream of text plans, generated audio frames, and estimated highlights.
+    ///
+    /// Each utterance emits `.utterancePlanned` before any `.audioFrame` for
+    /// that utterance, allowing clients to map audio chunk boundaries back to
+    /// source text without delaying audio playback. `.chunkHighlights` is
+    /// emitted after a chunk's audio completes.
+    ///
+    /// This is the stream Oratio consumes; audio is delivered here as
+    /// `.audioFrame` rather than on the legacy `frames` stream (see below).
+    public nonisolated let events: AsyncThrowingStream<PocketTtsSynthesizer.SessionEvent, Error>
+
     /// Stream of generated audio frames (80ms / 1920 samples at 24kHz each).
     ///
-    /// Frames are yielded as soon as they are generated. The stream completes
-    /// after `finish()` is called and all enqueued text has been synthesized,
-    /// or immediately if `cancel()` is called.
+    /// Retained for API compatibility. Audio is now delivered via `events`
+    /// (`.audioFrame`); this stream only completes/faults alongside `events`
+    /// and does not carry sample buffers, so an `events`-only consumer never
+    /// accumulates an unbounded unused frame backlog.
     public nonisolated let frames: AsyncThrowingStream<PocketTtsSynthesizer.AudioFrame, Error>
 
     /// Enqueue text for synthesis.
@@ -50,6 +62,7 @@ public actor PocketTtsSession {
 
     private nonisolated let textContinuation: AsyncStream<String>.Continuation
     private let textStream: AsyncStream<String>
+    private let eventContinuation: AsyncThrowingStream<PocketTtsSynthesizer.SessionEvent, Error>.Continuation
     private let frameContinuation: AsyncThrowingStream<PocketTtsSynthesizer.AudioFrame, Error>.Continuation
     private var generationTask: Task<Void, Never>?
 
@@ -137,10 +150,15 @@ public actor PocketTtsSession {
         self.textStream = textStream
         self.textContinuation = textContinuation
 
-        // Frame output stream
+        // Event and frame output streams
+        let (events, eventContinuation) = AsyncThrowingStream.makeStream(
+            of: PocketTtsSynthesizer.SessionEvent.self
+        )
         let (frames, frameContinuation) = AsyncThrowingStream.makeStream(
             of: PocketTtsSynthesizer.AudioFrame.self
         )
+        self.events = events
+        self.eventContinuation = eventContinuation
         self.frames = frames
         self.frameContinuation = frameContinuation
     }
@@ -191,10 +209,15 @@ public actor PocketTtsSession {
         self.textStream = textStream
         self.textContinuation = textContinuation
 
-        // Frame output stream
+        // Event and frame output streams
+        let (events, eventContinuation) = AsyncThrowingStream.makeStream(
+            of: PocketTtsSynthesizer.SessionEvent.self
+        )
         let (frames, frameContinuation) = AsyncThrowingStream.makeStream(
             of: PocketTtsSynthesizer.AudioFrame.self
         )
+        self.events = events
+        self.eventContinuation = eventContinuation
         self.frames = frames
         self.frameContinuation = frameContinuation
     }
@@ -206,6 +229,10 @@ public actor PocketTtsSession {
             await self.generateLoop()
         }
         frameContinuation.onTermination = { [weak self] _ in
+            guard let self else { return }
+            Task { await self.cancel() }
+        }
+        eventContinuation.onTermination = { [weak self] _ in
             guard let self else { return }
             Task { await self.cancel() }
         }
@@ -223,39 +250,42 @@ public actor PocketTtsSession {
                 let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !trimmed.isEmpty else { continue }
 
-                let chunks = PocketTtsSynthesizer.chunkTextWithMetadata(
+                let plan = PocketTtsSynthesizer.makeTextPlan(
                     trimmed, tokenizer: constants.tokenizer,
                     maxTokens: maxTokensPerChunk, language: language
                 )
+                let chunks = plan.chunks
                 Self.logger.info(
                     "Session enqueued '\(trimmed)', \(chunks.count) chunk(s)")
+                eventContinuation.yield(.utterancePlanned(utteranceIndex: utteranceIndex, plan: plan))
 
-                for (chunkIndex, chunk) in chunks.enumerated() {
+                for chunk in chunks {
                     if Task.isCancelled { break }
 
                     try await generateChunk(
-                        text: chunk.text,
-                        isMidSentence: chunk.isMidSentence,
-                        chunkIndex: chunkIndex,
+                        chunk: chunk,
                         chunkCount: chunks.count,
                         utteranceIndex: utteranceIndex
                     )
                 }
                 utteranceIndex += 1
             }
+            eventContinuation.finish()
             frameContinuation.finish()
         } catch {
+            eventContinuation.finish(throwing: error)
             frameContinuation.finish(throwing: error)
         }
     }
 
     private func generateChunk(
-        text: String,
-        isMidSentence: Bool,
-        chunkIndex: Int,
+        chunk: PocketTtsSynthesizer.PlanChunk,
         chunkCount: Int,
         utteranceIndex: Int
     ) async throws {
+        let text = chunk.synthesisText
+        let isMidSentence = chunk.isMidSentence
+        let chunkIndex = chunk.id
         if stateModels != nil {
             // `.aneState`: MLState multifunction pipeline. The store refuses
             // to load these models on pre-15/18 OSes, so this gate is
@@ -265,8 +295,7 @@ public actor PocketTtsSession {
                     "PocketTTS `.aneState` placement requires macOS 15+/iOS 18+")
             }
             try await generateChunkStateful(
-                text: text, isMidSentence: isMidSentence,
-                chunkIndex: chunkIndex, chunkCount: chunkCount,
+                chunk: chunk, chunkCount: chunkCount,
                 utteranceIndex: utteranceIndex)
             return
         }
@@ -302,6 +331,7 @@ public actor PocketTtsSession {
             bosEmbedding: constants.bosEmbedding,
             splitKV: flowlmLayerKeys.isSplitKV)
         let totalFramesAfterEos = framesAfterEos + PocketTtsConstants.extraFramesAfterDetection
+        var generatedSampleCount = 0
 
         for step in 0..<maxGenLen {
             if Task.isCancelled { break }
@@ -345,20 +375,42 @@ public actor PocketTtsSession {
             )
             mimiState = localMimi
 
-            // Yield frame
-            frameContinuation.yield(
-                PocketTtsSynthesizer.AudioFrame(
-                    samples: frameSamples,
-                    frameIndex: step,
-                    chunkIndex: chunkIndex,
-                    chunkCount: chunkCount,
-                    utteranceIndex: utteranceIndex
-                )
+            // Yield frame via the events stream. Oratio consumes `events`;
+            // duplicating sample arrays into the legacy `frames` stream would
+            // retain an unbounded unused buffer for events-only consumers.
+            let frame = PocketTtsSynthesizer.AudioFrame(
+                samples: frameSamples,
+                frameIndex: step,
+                chunkIndex: chunkIndex,
+                chunkCount: chunkCount,
+                utteranceIndex: utteranceIndex
             )
+            generatedSampleCount += frameSamples.count
+            eventContinuation.yield(.audioFrame(frame))
 
             // Autoregressive feedback
             sequence = try PocketTtsSynthesizer.createSequenceFromLatent(latent)
         }
+
+        emitHighlights(for: chunk, generatedSampleCount: generatedSampleCount, utteranceIndex: utteranceIndex)
+    }
+
+    /// Emit estimated word/reading highlight spans for a completed chunk.
+    private func emitHighlights(
+        for chunk: PocketTtsSynthesizer.PlanChunk,
+        generatedSampleCount: Int,
+        utteranceIndex: Int
+    ) {
+        let audioDuration = TimeInterval(generatedSampleCount) / TimeInterval(PocketTtsConstants.audioSampleRate)
+        let spans = PocketTtsSynthesizer.estimatedHighlightSpans(for: chunk, audioDuration: audioDuration)
+        guard spans.isEmpty == false else { return }
+        eventContinuation.yield(
+            .chunkHighlights(
+                utteranceIndex: utteranceIndex,
+                chunkIndex: chunk.id,
+                audioDuration: audioDuration,
+                spans: spans
+            ))
     }
 
     // MARK: - Stateful (`.aneState`) Generation — mobius Trial 23
@@ -436,12 +488,13 @@ public actor PocketTtsSession {
     /// are reproducible within a placement, not across placements).
     @available(macOS 15.0, iOS 18.0, *)
     private func generateChunkStateful(
-        text: String,
-        isMidSentence: Bool,
-        chunkIndex: Int,
+        chunk: PocketTtsSynthesizer.PlanChunk,
         chunkCount: Int,
         utteranceIndex: Int
     ) async throws {
+        let text = chunk.synthesisText
+        let isMidSentence = chunk.isMidSentence
+        let chunkIndex = chunk.id
         let engine = try stateEngine()
         let voiceSnapshot = try await stateVoiceFp16Snapshot(engine: engine)
 
@@ -472,6 +525,7 @@ public actor PocketTtsSession {
         var eosStep: Int?
         var sequence = constants.bosEmbedding
         let totalFramesAfterEos = framesAfterEos + PocketTtsConstants.extraFramesAfterDetection
+        var generatedSampleCount = 0
 
         for step in 0..<maxGenLen {
             if Task.isCancelled { break }
@@ -508,19 +562,21 @@ public actor PocketTtsSession {
             )
             mimiState = localMimi
 
-            // Yield frame
-            frameContinuation.yield(
-                PocketTtsSynthesizer.AudioFrame(
-                    samples: frameSamples,
-                    frameIndex: step,
-                    chunkIndex: chunkIndex,
-                    chunkCount: chunkCount,
-                    utteranceIndex: utteranceIndex
-                )
+            // Yield frame via the events stream (see IO path rationale).
+            let frame = PocketTtsSynthesizer.AudioFrame(
+                samples: frameSamples,
+                frameIndex: step,
+                chunkIndex: chunkIndex,
+                chunkCount: chunkCount,
+                utteranceIndex: utteranceIndex
             )
+            generatedSampleCount += frameSamples.count
+            eventContinuation.yield(.audioFrame(frame))
 
             // Autoregressive feedback
             sequence = latent
         }
+
+        emitHighlights(for: chunk, generatedSampleCount: generatedSampleCount, utteranceIndex: utteranceIndex)
     }
 }
