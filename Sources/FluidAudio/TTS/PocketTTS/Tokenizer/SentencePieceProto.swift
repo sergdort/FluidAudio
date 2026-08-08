@@ -2,17 +2,32 @@ import Foundation
 
 /// Minimal protobuf parser for SentencePiece `.model` files.
 ///
-/// Extracts only the vocabulary pieces (string + score) from the
-/// `ModelProto` message, ignoring trainer/normalizer specs.
+/// Extracts vocabulary pieces and the byte-fallback setting from the
+/// `ModelProto` message, ignoring unrelated trainer/normalizer fields.
 ///
 /// Wire format reference:
 /// - Tag = (field_number << 3) | wire_type
 /// - Wire type 0 = varint, 2 = length-delimited, 5 = 32-bit fixed
 enum SentencePieceProto {
 
+    enum PieceType: Int, Sendable {
+        case normal = 1
+        case unknown = 2
+        case control = 3
+        case userDefined = 4
+        case unused = 5
+        case byte = 6
+    }
+
     struct Piece: Sendable {
         let piece: String
         let score: Float
+        let type: PieceType
+    }
+
+    struct Model: Sendable {
+        let pieces: [Piece]
+        let byteFallbackEnabled: Bool
     }
 
     enum ParseError: Error {
@@ -23,7 +38,13 @@ enum SentencePieceProto {
 
     /// Parse a SentencePiece `.model` file and return the vocabulary pieces.
     static func parse(_ data: Data) throws -> [Piece] {
+        try parseModel(data).pieces
+    }
+
+    /// Parse the fields required for SentencePiece unigram tokenization.
+    static func parseModel(_ data: Data) throws -> Model {
         var pieces: [Piece] = []
+        var byteFallbackEnabled = false
         var offset = 0
         let bytes = Array(data)
         let count = bytes.count
@@ -42,13 +63,16 @@ enum SentencePieceProto {
             case 2:
                 // Length-delimited
                 let length = try readVarint(bytes: bytes, count: count, offset: &offset)
-                let end = offset + Int(length)
-                guard end <= count else { throw ParseError.unexpectedEnd }
+                let end = try lengthDelimitedEnd(length: length, offset: offset, limit: count)
 
                 if fieldNumber == 1 {
                     // Top-level field 1 = repeated SentencePiece message
                     let piece = try parsePiece(bytes: bytes, start: offset, end: end)
                     pieces.append(piece)
+                } else if fieldNumber == 2 {
+                    // Top-level field 2 = TrainerSpec message
+                    byteFallbackEnabled = try parseByteFallbackSetting(
+                        bytes: bytes, start: offset, end: end)
                 }
                 // Skip to end of this field regardless
                 offset = end
@@ -61,7 +85,7 @@ enum SentencePieceProto {
             }
         }
 
-        return pieces
+        return Model(pieces: pieces, byteFallbackEnabled: byteFallbackEnabled)
     }
 
     // MARK: - Private
@@ -70,20 +94,23 @@ enum SentencePieceProto {
         var offset = start
         var piece: String?
         var score: Float = 0
+        var type: PieceType = .normal
 
         while offset < end {
             let (fieldNumber, wireType) = try readTag(bytes: bytes, count: end, offset: &offset)
 
             switch wireType {
             case 0:
-                _ = try readVarint(bytes: bytes, count: end, offset: &offset)
+                let value = try readVarint(bytes: bytes, count: end, offset: &offset)
+                if fieldNumber == 3 {
+                    type = PieceType(rawValue: Int(value)) ?? .unused
+                }
             case 1:
                 offset += 8
                 guard offset <= end else { throw ParseError.unexpectedEnd }
             case 2:
                 let length = try readVarint(bytes: bytes, count: end, offset: &offset)
-                let fieldEnd = offset + Int(length)
-                guard fieldEnd <= end else { throw ParseError.unexpectedEnd }
+                let fieldEnd = try lengthDelimitedEnd(length: length, offset: offset, limit: end)
 
                 if fieldNumber == 1 {
                     // SentencePiece.piece (string)
@@ -107,7 +134,50 @@ enum SentencePieceProto {
             }
         }
 
-        return Piece(piece: piece ?? "", score: score)
+        return Piece(piece: piece ?? "", score: score, type: type)
+    }
+
+    private static func parseByteFallbackSetting(
+        bytes: [UInt8], start: Int, end: Int
+    ) throws -> Bool {
+        var byteFallbackEnabled = false
+        var offset = start
+
+        while offset < end {
+            let (fieldNumber, wireType) = try readTag(bytes: bytes, count: end, offset: &offset)
+
+            switch wireType {
+            case 0:
+                let value = try readVarint(bytes: bytes, count: end, offset: &offset)
+                if fieldNumber == 35 {
+                    byteFallbackEnabled = value != 0
+                }
+            case 1:
+                offset += 8
+                guard offset <= end else { throw ParseError.unexpectedEnd }
+            case 2:
+                let length = try readVarint(bytes: bytes, count: end, offset: &offset)
+                offset = try lengthDelimitedEnd(length: length, offset: offset, limit: end)
+            case 5:
+                offset += 4
+                guard offset <= end else { throw ParseError.unexpectedEnd }
+            default:
+                throw ParseError.invalidData
+            }
+        }
+
+        return byteFallbackEnabled
+    }
+
+    private static func lengthDelimitedEnd(
+        length: UInt64,
+        offset: Int,
+        limit: Int
+    ) throws -> Int {
+        guard offset <= limit, length <= UInt64(limit - offset) else {
+            throw ParseError.unexpectedEnd
+        }
+        return offset + Int(length)
     }
 
     private static func readTag(

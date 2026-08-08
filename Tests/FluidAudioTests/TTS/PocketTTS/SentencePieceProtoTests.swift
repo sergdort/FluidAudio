@@ -28,7 +28,11 @@ final class SentencePieceProtoTests: XCTestCase {
     }
 
     /// Build a SentencePiece sub-message with string (field 1) and optional score (field 2)
-    private func makePieceMessage(string: String, score: Float? = nil) -> [UInt8] {
+    private func makePieceMessage(
+        string: String,
+        score: Float? = nil,
+        type: SentencePieceProto.PieceType? = nil
+    ) -> [UInt8] {
         var body: [UInt8] = []
 
         // field 1, wire type 2 (string)
@@ -43,11 +47,20 @@ final class SentencePieceProtoTests: XCTestCase {
             body.append(contentsOf: makeFloat32Bytes(score))
         }
 
+        // field 3, wire type 0 (SentencePiece.Type)
+        if let type {
+            body.append(contentsOf: makeTag(fieldNumber: 3, wireType: 0))
+            body.append(contentsOf: makeVarint(UInt64(type.rawValue)))
+        }
+
         return body
     }
 
     /// Wrap piece messages as top-level field 1 of ModelProto
-    private func wrapInModelProto(pieces: [[UInt8]]) -> Data {
+    private func wrapInModelProto(
+        pieces: [[UInt8]],
+        byteFallbackEnabled: Bool? = nil
+    ) -> Data {
         var data: [UInt8] = []
         for piece in pieces {
             // Top-level field 1, wire type 2 (length-delimited)
@@ -55,6 +68,17 @@ final class SentencePieceProtoTests: XCTestCase {
             data.append(contentsOf: makeVarint(UInt64(piece.count)))
             data.append(contentsOf: piece)
         }
+
+        if let byteFallbackEnabled {
+            var trainerSpec: [UInt8] = []
+            trainerSpec.append(contentsOf: makeTag(fieldNumber: 35, wireType: 0))
+            trainerSpec.append(contentsOf: makeVarint(byteFallbackEnabled ? 1 : 0))
+
+            data.append(contentsOf: makeTag(fieldNumber: 2, wireType: 2))
+            data.append(contentsOf: makeVarint(UInt64(trainerSpec.count)))
+            data.append(contentsOf: trainerSpec)
+        }
+
         return Data(data)
     }
 
@@ -110,6 +134,76 @@ final class SentencePieceProtoTests: XCTestCase {
         XCTAssertThrowsError(try SentencePieceProto.parse(Data(data)))
     }
 
+    func testParseOversizedLengthThrows() {
+        var data: [UInt8] = []
+        data.append(contentsOf: makeTag(fieldNumber: 1, wireType: 2))
+        data.append(contentsOf: makeVarint(UInt64.max))
+
+        XCTAssertThrowsError(try SentencePieceProto.parse(Data(data)))
+    }
+
+    func testParseModelReadsPieceTypesAndByteFallbackSetting() throws {
+        let data = wrapInModelProto(
+            pieces: [
+                makePieceMessage(string: "custom-unknown", score: 0, type: .unknown),
+                makePieceMessage(string: "<0x28>", score: 0, type: .byte),
+            ],
+            byteFallbackEnabled: true
+        )
+
+        let model = try SentencePieceProto.parseModel(data)
+
+        XCTAssertTrue(model.byteFallbackEnabled)
+        XCTAssertEqual(model.pieces.map(\.type), [.unknown, .byte])
+    }
+
+    // MARK: - Tokenizer Byte Fallback
+
+    func testEncodeByteFallbackPreservesSubwordsAroundParentheses() throws {
+        let tokenizer = try makeByteFallbackTokenizer(normalPieces: [
+            ("▁", -10),
+            ("▁The", -1),
+            ("room", -1),
+        ])
+
+        XCTAssertEqual(tokenizer.encode("The (room)"), [258, 257, 41, 259, 42])
+    }
+
+    func testEncodeByteFallbackPreservesUTF8ByteOrder() throws {
+        let tokenizer = try makeByteFallbackTokenizer(normalPieces: [
+            ("▁", -10),
+            ("▁Pay", -1),
+            ("now", -1),
+        ])
+
+        XCTAssertEqual(
+            tokenizer.encode("Pay😀€now"),
+            [258, 241, 160, 153, 129, 227, 131, 173, 259]
+        )
+    }
+
+    func testEncodeMergesAdjacentUnknownTokensWhenByteFallbackIsDisabled() throws {
+        let tokenizer = try makeTokenizer(pieces: [
+            ("<unk>", -100, .unknown),
+            ("▁", -10, .normal),
+            ("▁hello", -1, .normal),
+            ("world", -1, .normal),
+        ])
+
+        XCTAssertEqual(tokenizer.encode("hello((world"), [2, 0, 3])
+    }
+
+    func testEncodeUnknownEdgeCompetesWithLongerPiece() throws {
+        let tokenizer = try makeTokenizer(pieces: [
+            ("<unk>", -100, .unknown),
+            ("▁", -1, .normal),
+            ("xy", -5, .normal),
+            ("yz", -1, .normal),
+        ])
+
+        XCTAssertEqual(tokenizer.encode("xyz"), [1, 0, 3])
+    }
+
     // MARK: - PocketTTSError
 
     func testPocketTTSErrorDescriptions() {
@@ -131,6 +225,37 @@ final class SentencePieceProtoTests: XCTestCase {
         XCTAssertTrue(
             error.errorDescription!.contains("myModel"),
             "Error description should contain the model name"
+        )
+    }
+
+    private func makeTokenizer(
+        pieces: [(String, Float, SentencePieceProto.PieceType)]
+    ) throws -> SentencePieceTokenizer {
+        let messages = pieces.map { piece, score, type in
+            makePieceMessage(string: piece, score: score, type: type)
+        }
+        return try SentencePieceTokenizer(modelData: wrapInModelProto(pieces: messages))
+    }
+
+    private func makeByteFallbackTokenizer(
+        normalPieces: [(String, Float)]
+    ) throws -> SentencePieceTokenizer {
+        var messages = [makePieceMessage(string: "<unk>", score: 0, type: .unknown)]
+        messages.append(
+            contentsOf: (0...255).map { byte in
+                makePieceMessage(
+                    string: String(format: "<0x%02X>", byte),
+                    score: 0,
+                    type: .byte
+                )
+            })
+        messages.append(
+            contentsOf: normalPieces.map { piece, score in
+                makePieceMessage(string: piece, score: score, type: .normal)
+            })
+
+        return try SentencePieceTokenizer(
+            modelData: wrapInModelProto(pieces: messages, byteFallbackEnabled: true)
         )
     }
 }

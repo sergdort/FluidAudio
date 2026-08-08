@@ -10,24 +10,64 @@ public struct SentencePieceTokenizer: Sendable {
     private let pieces: [SentencePieceProto.Piece]
     /// Lookup from piece string to token ID.
     private let pieceToId: [String: Int]
-    /// Maximum piece length in UTF-8 scalars for early termination.
+    /// Lookup from a raw UTF-8 byte to its SentencePiece byte-fallback token ID.
+    private let bytePieceIds: [UInt8: Int]
+    /// Whether unknown scalars must expand to UTF-8 byte tokens.
+    private let byteFallbackEnabled: Bool
+    /// Token ID used for an unknown scalar before optional byte expansion.
+    private let unknownPieceId: Int?
+    /// Score assigned to unknown scalar edges during Viterbi decoding.
+    private let unknownScore: Float
+    /// Maximum piece length in Unicode scalars for early termination.
     private let maxPieceLength: Int
 
     /// The space replacement character used by SentencePiece.
     private static let spaceMarker: Character = "\u{2581}"
+    private static let unknownPenalty: Float = 10
 
     public init(modelData: Data) throws {
-        let parsed = try SentencePieceProto.parse(modelData)
-        self.pieces = parsed
+        let model = try SentencePieceProto.parseModel(modelData)
+        self.pieces = model.pieces
 
         var lookup: [String: Int] = [:]
-        lookup.reserveCapacity(parsed.count)
+        lookup.reserveCapacity(model.pieces.count)
+        var byteLookup: [UInt8: Int] = [:]
         var maxLen = 0
-        for (index, entry) in parsed.enumerated() {
-            lookup[entry.piece] = index
-            maxLen = max(maxLen, entry.piece.unicodeScalars.count)
+        var unknownId: Int?
+        var unknownCount = 0
+        var minimumNormalScore: Float?
+        for (index, entry) in model.pieces.enumerated() {
+            switch entry.type {
+            case .normal:
+                lookup[entry.piece] = index
+                maxLen = max(maxLen, entry.piece.unicodeScalars.count)
+                minimumNormalScore = min(minimumNormalScore ?? entry.score, entry.score)
+            case .unknown:
+                unknownId = index
+                unknownCount += 1
+            case .userDefined:
+                lookup[entry.piece] = index
+                maxLen = max(maxLen, entry.piece.unicodeScalars.count)
+            case .byte:
+                if let byte = Self.byteValue(for: entry.piece) {
+                    byteLookup[byte] = index
+                }
+            case .control, .unused:
+                break
+            }
         }
+
+        if model.byteFallbackEnabled {
+            guard unknownCount == 1, byteLookup.count == 256 else {
+                throw SentencePieceProto.ParseError.invalidData
+            }
+        }
+
         self.pieceToId = lookup
+        self.bytePieceIds = byteLookup
+        self.byteFallbackEnabled = model.byteFallbackEnabled
+        self.unknownPieceId = unknownId
+        self.unknownScore = (minimumNormalScore ?? 0) - Self.unknownPenalty
         self.maxPieceLength = maxLen
     }
 
@@ -59,10 +99,10 @@ public struct SentencePieceTokenizer: Sendable {
         guard n > 0 else { return [] }
 
         // bestScore[i] = best log-probability score for text[0..<i]
-        // bestPiece[i] = (pieceId, startPosition) for the piece ending at i
+        // bestStep[i] = token IDs and start position for the step ending at i
         let negInf: Float = -.infinity
         var bestScore = [Float](repeating: negInf, count: n + 1)
-        var bestPiece = [(pieceId: Int, start: Int)](repeating: (0, 0), count: n + 1)
+        var bestStep = [DecodingStep?](repeating: nil, count: n + 1)
         bestScore[0] = 0
 
         // Build a string from scalars for substring matching
@@ -71,50 +111,87 @@ public struct SentencePieceTokenizer: Sendable {
             guard bestScore[i] > negInf else { continue }
 
             let maxLen = min(maxPieceLength, n - i)
-            for length in 1...maxLen {
-                let end = i + length
-                // Build candidate substring from scalars
-                let candidate = String(String.UnicodeScalarView(scalars[i..<end]))
+            var hasSingleScalarPiece = false
+            if maxLen > 0 {
+                for length in 1...maxLen {
+                    let end = i + length
+                    // Build candidate substring from scalars
+                    let candidate = String(String.UnicodeScalarView(scalars[i..<end]))
 
-                guard let pieceId = pieceToId[candidate] else { continue }
-                let piece = pieces[pieceId]
+                    guard let pieceId = pieceToId[candidate] else { continue }
+                    if length == 1 {
+                        hasSingleScalarPiece = true
+                    }
+                    let piece = pieces[pieceId]
 
-                let newScore = bestScore[i] + piece.score
-                if newScore > bestScore[end] {
-                    bestScore[end] = newScore
-                    bestPiece[end] = (pieceId: pieceId, start: i)
+                    let pieceScore: Float
+                    if piece.type == .userDefined {
+                        pieceScore = 0.1 * Float(length - 1)
+                    } else {
+                        pieceScore = piece.score
+                    }
+                    let newScore = bestScore[i] + pieceScore
+                    if newScore > bestScore[end] {
+                        bestScore[end] = newScore
+                        bestStep[end] = DecodingStep(tokenIds: [pieceId], start: i)
+                    }
                 }
+            }
+
+            guard !hasSingleScalarPiece, let unknownPieceId else { continue }
+
+            let fallbackIds = fallbackTokenIds(for: scalars[i], unknownPieceId: unknownPieceId)
+            let fallbackScore = bestScore[i] + unknownScore
+            let end = i + 1
+            if fallbackScore > bestScore[end] {
+                bestScore[end] = fallbackScore
+                bestStep[end] = DecodingStep(tokenIds: fallbackIds, start: i)
             }
         }
 
         // Backtrack to collect token IDs
-        guard bestScore[n] > negInf else {
-            // Fallback: encode as individual characters
-            return fallbackEncode(scalars)
-        }
+        guard bestScore[n] > negInf else { return [] }
 
-        var ids: [Int] = []
+        var reversedSteps: [[Int]] = []
         var pos = n
         while pos > 0 {
-            let (pieceId, start) = bestPiece[pos]
-            ids.append(pieceId)
-            pos = start
+            guard let step = bestStep[pos] else { return [] }
+            reversedSteps.append(step.tokenIds)
+            pos = step.start
         }
 
-        ids.reverse()
-        return ids
+        let tokenIds = reversedSteps.reversed().flatMap { $0 }
+        guard !byteFallbackEnabled, let unknownPieceId else { return tokenIds }
+
+        return tokenIds.reduce(into: []) { mergedIds, tokenId in
+            if tokenId != unknownPieceId || mergedIds.last != unknownPieceId {
+                mergedIds.append(tokenId)
+            }
+        }
     }
 
-    /// Fallback: encode each character as a separate token.
-    private func fallbackEncode(_ scalars: [Unicode.Scalar]) -> [Int] {
-        var ids: [Int] = []
-        for scalar in scalars {
-            let char = String(scalar)
-            if let id = pieceToId[char] {
-                ids.append(id)
-            }
-            // Unknown characters are silently dropped
+    private func fallbackTokenIds(for scalar: Unicode.Scalar, unknownPieceId: Int) -> [Int] {
+        guard byteFallbackEnabled else { return [unknownPieceId] }
+
+        let bytes = Array(String(scalar).utf8)
+        let byteIds = bytes.compactMap { bytePieceIds[$0] }
+        if byteIds.count == bytes.count {
+            return byteIds
         }
-        return ids
+
+        return [unknownPieceId]
+    }
+
+    private static func byteValue(for piece: String) -> UInt8? {
+        guard piece.count == 6, piece.hasPrefix("<0x"), piece.hasSuffix(">") else {
+            return nil
+        }
+
+        return UInt8(piece.dropFirst(3).dropLast(), radix: 16)
+    }
+
+    private struct DecodingStep {
+        let tokenIds: [Int]
+        let start: Int
     }
 }
