@@ -24,6 +24,34 @@ final class PocketTtsTextPlanTests: XCTestCase {
         XCTAssertFalse(text.contains("e.g."))
     }
 
+    func testNormalizeTextExpandsEgFollowedByCommaInsideParentheses() {
+        let (text, _) = PocketTtsSynthesizer.normalizeText(
+            "Once you start seeing results (e.g., clothes fit different, you can lift heavier weights)."
+        )
+
+        XCTAssertTrue(text.contains("results (for example, clothes fit"), "got: '\(text)'")
+        XCTAssertFalse(text.contains("e.g"), "got: '\(text)'")
+    }
+
+    func testNormalizeTextExpandsCapitalizedLatinAbbreviations() {
+        // Short inputs gain Pocket's leading-space padding; compare the spoken words.
+        XCTAssertEqual(
+            PocketTtsSynthesizer.normalizeText("E.g. lemons and limes").text.trimmingCharacters(in: .whitespaces),
+            "For example lemons and limes."
+        )
+        XCTAssertEqual(
+            PocketTtsSynthesizer.normalizeText("I.e., the rule").text.trimmingCharacters(in: .whitespaces),
+            "That is, the rule."
+        )
+    }
+
+    func testSplitSentencesKeepsDottedLatinAbbreviationInsideSentence() {
+        XCTAssertEqual(
+            PocketTtsSynthesizer.splitSentences("Results (e.g., fit). Next one."),
+            ["Results (e.g., fit).", "Next one."]
+        )
+    }
+
     func testNormalizeTextLeavesWorkingAbbreviationsUnchanged() {
         let (text, _) = PocketTtsSynthesizer.normalizeText("Debate policy vs. precedent, etc.")
 
@@ -105,6 +133,19 @@ final class PocketTtsTextPlanTests: XCTestCase {
         let plan = PocketTtsSynthesizer.makeTextPlan(text, tokenizer: tokenizer, maxTokens: 10)
 
         XCTAssertEqual(plan.chunks.map(\.synthesisText), ["\"Hello.\"", "\"Bye.\""])
+    }
+
+    func testTextPlanDoesNotSplitSentenceInsideDottedLatinAbbreviation() throws {
+        let text = "Hi. Results (e.g., fit)."
+        let tokenizer = try makeCharacterTokenizer(for: [text])
+
+        let plan = PocketTtsSynthesizer.makeTextPlan(text, tokenizer: tokenizer, maxTokens: 22)
+
+        XCTAssertEqual(plan.chunks.map(\.synthesisText), ["Hi.", "Results (e.g., fit)."])
+        XCTAssertEqual(
+            plan.chunks.last?.normalizedText.trimmingCharacters(in: .whitespaces),
+            "Results (for example, fit)."
+        )
     }
 
     func testTextPlanPopulatesWordsWithSourceRanges() throws {

@@ -563,25 +563,15 @@ extension PocketTtsSynthesizer {
                 continue
             }
 
-            if mapped.character == "." {
-                let currentText = MappedText(characters: current).text.trimmingCharacters(in: .whitespaces)
-                let withoutPeriod = String(currentText.dropLast())
-                let lastWord = withoutPeriod.split(separator: " ").last.map(String.init) ?? withoutPeriod
-
-                if abbreviations.contains(lastWord.lowercased()) {
-                    index += 1
-                    continue
-                }
-
-                if lastWord.count == 1, lastWord.first?.isUppercase == true {
-                    index += 1
-                    continue
-                }
-
-                if index + 1 < characters.count, characters[index + 1].character.isNumber {
-                    index += 1
-                    continue
-                }
+            if mapped.character == ".",
+                isNonTerminalPeriod(
+                    textThroughPeriod: MappedText(characters: current).text,
+                    nextCharacter: index + 1 < characters.count ? characters[index + 1].character : nil,
+                    abbreviations: abbreviations
+                )
+            {
+                index += 1
+                continue
             }
 
             index += 1

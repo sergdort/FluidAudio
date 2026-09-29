@@ -777,8 +777,10 @@ public struct PocketTtsSynthesizer {
     }
 
     static let abbreviationExpansions: [(pattern: String, replacement: String)] = [
-        (#"\bi\.e\.(?=\s|$)"#, "that is"),
-        (#"\be\.g\.(?=\s|$)"#, "for example"),
+        (#"\bi\.[eE]\.(?![A-Za-z])"#, "that is"),
+        (#"\bI\.[eE]\.(?![A-Za-z])"#, "That is"),
+        (#"\be\.[gG]\.(?![A-Za-z])"#, "for example"),
+        (#"\bE\.[gG]\.(?![A-Za-z])"#, "For example"),
     ]
 
     /// Language-specific pre-normalization applied before the shared
@@ -1144,6 +1146,7 @@ public struct PocketTtsSynthesizer {
         "inc", "ltd", "co", "corp", "dept", "univ", "govt", "approx",
         "avg", "est", "gen", "gov", "hon", "sgt", "cpl", "pvt", "capt",
         "lt", "col", "maj", "cmdr", "adm", "rev", "sen", "rep",
+        "e.g", "i.e",
     ]
 
     /// French abbreviations that end with a period but don't end a sentence.
@@ -1195,27 +1198,14 @@ public struct PocketTtsSynthesizer {
 
             guard ".!?".contains(char) else { continue }
 
-            // For periods, check if this is an abbreviation
-            if char == "." {
-                let trimmed = current.trimmingCharacters(in: .whitespaces)
-                // Get the last word before the period
-                let withoutPeriod = String(trimmed.dropLast())
-                let lastWord = withoutPeriod.split(separator: " ").last.map(String.init) ?? withoutPeriod
-
-                // Skip if it's a known abbreviation
-                if abbrevSet.contains(lastWord.lowercased()) {
-                    continue
-                }
-
-                // Skip if it's a single uppercase letter (e.g., "J." in initials)
-                if lastWord.count == 1, lastWord.first?.isUppercase == true {
-                    continue
-                }
-
-                // Skip if followed by a digit (e.g., "3.5")
-                if i + 1 < chars.count, chars[i + 1].isNumber {
-                    continue
-                }
+            if char == ".",
+                isNonTerminalPeriod(
+                    textThroughPeriod: current,
+                    nextCharacter: i + 1 < chars.count ? chars[i + 1] : nil,
+                    abbreviations: abbrevSet
+                )
+            {
+                continue
             }
 
             let trimmed = current.trimmingCharacters(in: .whitespaces)
@@ -1232,6 +1222,27 @@ public struct PocketTtsSynthesizer {
         }
 
         return sentences
+    }
+
+    /// Whether a `.` belongs to an abbreviation, initial, decimal, or dotted
+    /// token (e.g. "e.g.", "3.5", "J.") rather than ending a sentence.
+    static func isNonTerminalPeriod(
+        textThroughPeriod: String,
+        nextCharacter: Character?,
+        abbreviations: Set<String>
+    ) -> Bool {
+        if let nextCharacter, nextCharacter.isNumber || nextCharacter.isLetter {
+            return true
+        }
+        let trimmed = textThroughPeriod.trimmingCharacters(in: .whitespaces)
+        let withoutPeriod = String(trimmed.dropLast())
+        let lastToken = withoutPeriod.split(separator: " ").last.map(String.init) ?? withoutPeriod
+        // Ignore opening brackets/quotes so "(e.g." and "(J." still match.
+        let lastWord = String(lastToken.drop(while: { $0.isLetter == false }))
+        if abbreviations.contains(lastWord.lowercased()) {
+            return true
+        }
+        return lastWord.count == 1 && lastWord.first?.isUppercase == true
     }
 
     // MARK: - Embedding
