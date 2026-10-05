@@ -1,3 +1,7 @@
+// Modified by Serg Dort for Oratio in the sergdort/FluidAudio fork (branch oratio-fork-v2.1), 2026:
+// adds tests for piece types and byte fallback.
+// Original work: FluidInference/FluidAudio, Apache License 2.0. See FORK_CHANGES.md.
+
 import Foundation
 import XCTest
 

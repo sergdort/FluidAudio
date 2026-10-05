@@ -1,3 +1,8 @@
+// Modified by Serg Dort for Oratio in the sergdort/FluidAudio fork (branch oratio-fork-v2.1), 2026:
+// adds speakable abbreviation expansion (e.g./i.e.),
+// trailing-quote-aware terminal punctuation, and abbreviation-aware sentence splitting.
+// Original work: FluidInference/FluidAudio, Apache License 2.0. See FORK_CHANGES.md.
+
 @preconcurrency import CoreML
 import Foundation
 
