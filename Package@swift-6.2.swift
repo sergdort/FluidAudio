@@ -52,11 +52,9 @@ let package = Package(
                 ),
             ],
             path: "Sources/FluidAudio",
-            exclude: ["ASR/Parakeet/Unified/benchmark.md"],
-            resources: [
-                // Keep .process: .copy of a Resources-named directory breaks Apple code signing on iOS.
-                .process("TTS/LuxTts/G2p/Resources")
-            ]
+            // Oratio fork: the LuxTTS G2P tables are espeak-ng (GPL-3.0) derived data, so they are
+            // not bundled. See FORK_CHANGES.md and ThirdPartyLicenses/LuxTtsEnglishG2P-LICENSE.md.
+            exclude: ["ASR/Parakeet/Unified/benchmark.md", "TTS/LuxTts/G2p/Resources"]
         ),
         // Byte-exact NeMo text normalization (FST engine, all 7 languages).
         // Prebuilt xcframework from FluidInference/text-processing-rs v0.3.1

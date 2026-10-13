@@ -4,11 +4,21 @@ This branch (`oratio-fork-v2.2` of `sergdort/FluidAudio`) is a modified version 
 [FluidInference/FluidAudio](https://github.com/FluidInference/FluidAudio), based on upstream
 commit `793a2c5a0e99705a55fefbad00e65ca684329349`. It is used by the Oratio app and is
 distributed under the same [Apache License 2.0](LICENSE). The changes are by Serg Dort (2026)
-and are limited to PocketTTS.
+and are limited to PocketTTS and to not bundling the LuxTTS G2P tables.
 
 ## Modified files
 
-Each modified file starts with a comment describing the change.
+Each modified Swift source file starts with a comment describing the change. The package
+manifests carry the comment next to the change.
+
+- `Package.swift`, `Package@swift-6.2.swift` — the `FluidAudio` target excludes
+  `TTS/LuxTts/G2p/Resources` instead of bundling it. Those tables are derived from espeak-ng
+  (GPL-3.0-or-later) and word lists under other licenses (see
+  `ThirdPartyLicenses/LuxTtsEnglishG2P-LICENSE.md`), and Oratio does not use LuxTTS.
+- `Sources/FluidAudio/TTS/LuxTts/G2p/LuxTtsG2p.swift` — `init()` throws because the tables are
+  not bundled; `init(lexiconURL:auxURL:)` is public so callers can supply them.
+- `Tests/FluidAudioTests/TTS/LuxTts/LuxTtsG2pTests.swift` — loads the tables from the source
+  tree.
 
 - `Sources/FluidAudio/TTS/PocketTTS/Pipeline/PocketTtsSession.swift` — `events` stream with
   text plans, audio frames, and estimated highlights; audio is delivered through it. Text is

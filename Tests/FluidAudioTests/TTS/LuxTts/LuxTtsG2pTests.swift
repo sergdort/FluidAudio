@@ -1,3 +1,7 @@
+// Modified by Serg Dort for Oratio in the sergdort/FluidAudio fork (branch oratio-fork-v2.2), 2026:
+// loads the G2P tables from the source tree because they are no longer bundled.
+// Original work: FluidInference/FluidAudio, Apache License 2.0. See FORK_CHANGES.md.
+
 import XCTest
 
 @testable import FluidAudio
@@ -28,8 +32,17 @@ final class LuxTtsG2pTests: XCTestCase {
     }
 
     private static let g2p: LuxTtsG2p = {
+        let resources = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()  // LuxTts
+            .deletingLastPathComponent()  // TTS
+            .deletingLastPathComponent()  // FluidAudioTests
+            .deletingLastPathComponent()  // Tests
+            .deletingLastPathComponent()  // package root
+            .appendingPathComponent("Sources/FluidAudio/TTS/LuxTts/G2p/Resources")
         do {
-            return try LuxTtsG2p()
+            return try LuxTtsG2p(
+                lexiconURL: resources.appendingPathComponent("luxtts_en_us_lexicon.tsv.zz"),
+                auxURL: resources.appendingPathComponent("luxtts_en_us_g2p_aux.json"))
         } catch {
             fatalError("cannot load bundled G2P resources: \(error)")
         }

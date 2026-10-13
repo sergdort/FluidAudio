@@ -1,3 +1,7 @@
+// Modified by Serg Dort for Oratio in the sergdort/FluidAudio fork (branch oratio-fork-v2.2), 2026:
+// the G2P tables are no longer bundled, so `init()` throws and `init(lexiconURL:auxURL:)` is public.
+// Original work: FluidInference/FluidAudio, Apache License 2.0. See FORK_CHANGES.md.
+
 import Foundation
 
 /// English text → espeak-IPA phonemes for LuxTTS (phase 2).
@@ -73,20 +77,14 @@ public struct LuxTtsG2p: Sendable {
 
     // MARK: - Loading
 
-    /// Load the bundled lexicon + aux tables.
+    /// The Oratio fork does not bundle the lexicon + aux tables, so this always throws.
+    /// Load them from files with `init(lexiconURL:auxURL:)` instead.
     public init() throws {
-        guard
-            let lexiconURL = Bundle.module.url(
-                forResource: "luxtts_en_us_lexicon.tsv", withExtension: "zz"),
-            let auxURL = Bundle.module.url(
-                forResource: "luxtts_en_us_g2p_aux", withExtension: "json")
-        else {
-            throw LuxTtsError.tokenizerFailed("bundled G2P resources missing")
-        }
-        try self.init(lexiconURL: lexiconURL, auxURL: auxURL)
+        throw LuxTtsError.tokenizerFailed(
+            "LuxTTS G2P resources are not bundled in this fork; use init(lexiconURL:auxURL:)")
     }
 
-    init(lexiconURL: URL, auxURL: URL) throws {
+    public init(lexiconURL: URL, auxURL: URL) throws {
         let compressed = try Data(contentsOf: lexiconURL)
         let tsvData: Data
         do {
