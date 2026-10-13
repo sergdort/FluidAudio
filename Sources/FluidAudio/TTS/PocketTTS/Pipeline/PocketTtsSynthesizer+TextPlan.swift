@@ -125,17 +125,24 @@ extension PocketTtsSynthesizer {
     /// Build a `TextPlan` for `text`, mapping each synthesizable chunk (and its
     /// words) back to exact UTF-16 source ranges.
     ///
-    /// Chunk boundaries mirror `chunkTextWithMetadata`, including the
-    /// `isMidSentence` prosody flag (#584); the `language` parameter selects the
+    /// Cache-safe sentences stay whole; separate sentences group up to the
+    /// preferred target. The default cache budget is shared by live sessions,
+    /// independent of voice selection. Includes the `isMidSentence` prosody
+    /// flag (#584); the `language` parameter selects the
     /// normalization used for each chunk's `normalizedText`.
     public static func makeTextPlan(
         _ text: String,
         tokenizer: SentencePieceTokenizer,
         maxTokens: Int = PocketTtsConstants.maxTokensPerChunk,
+        preferredMaxTokens: Int = PocketTtsConstants.preferredTokensPerChunk,
+        voiceCachePosition: Int = PocketTtsConstants.planningVoiceCachePosition,
         language: PocketTtsLanguage = .english
     ) -> TextPlan {
         let mappedText = makeMappedCanonicalText(from: text)
-        let mappedChunks = chunkMappedText(mappedText, tokenizer: tokenizer, maxTokens: maxTokens)
+        let mappedChunks = chunkMappedText(
+            mappedText, tokenizer: tokenizer, maxTokens: maxTokens,
+            preferredMaxTokens: min(preferredMaxTokens, maxTokens),
+            voiceCachePosition: voiceCachePosition, language: language)
         let chunks = mappedChunks.enumerated().map { index, mappedChunk -> PlanChunk in
             let sourceText = sourceSubstring(in: text, range: mappedChunk.text.sourceRange) ?? ""
             let words = splitMappedWords(mappedChunk.text).enumerated().map { wordIndex, word in
@@ -231,14 +238,23 @@ extension PocketTtsSynthesizer {
     private static func chunkMappedText(
         _ text: MappedText,
         tokenizer: SentencePieceTokenizer,
-        maxTokens: Int
+        maxTokens: Int,
+        preferredMaxTokens: Int,
+        voiceCachePosition: Int,
+        language: PocketTtsLanguage
     ) -> [MappedChunk] {
         guard text.text.isEmpty == false else {
             return []
         }
 
-        let tokenCount = tokenizer.encode(text.text).count
-        if tokenCount <= maxTokens {
+        func fits(_ candidate: MappedText, isMidSentence: Bool = false) -> Bool {
+            fitsTextChunk(
+                candidate.text, tokenizer: tokenizer, maxTokens: maxTokens,
+                voiceCachePosition: voiceCachePosition, isMidSentence: isMidSentence, language: language)
+        }
+
+        let tokenCount = tokenizer.encode(normalizeText(text.text, language: language).text).count
+        if tokenCount <= preferredMaxTokens && fits(text) {
             return [MappedChunk(text: text, isMidSentence: false)]
         }
 
@@ -249,11 +265,12 @@ extension PocketTtsSynthesizer {
         // their casing/punctuation (#584).
         var pieces: [MappedChunk] = []
         for sentence in sentences {
-            let sentenceTokens = tokenizer.encode(sentence.text).count
-            if sentenceTokens <= maxTokens {
+            if fits(sentence) {
                 pieces.append(MappedChunk(text: sentence, isMidSentence: false))
             } else {
-                let subPieces = splitMappedOversizedSentence(sentence, tokenizer: tokenizer, maxTokens: maxTokens)
+                let subPieces = splitMappedOversizedSentence(
+                    sentence, tokenizer: tokenizer, maxTokens: maxTokens,
+                    voiceCachePosition: voiceCachePosition, language: language)
                 for (subIndex, subPiece) in subPieces.enumerated() {
                     pieces.append(MappedChunk(text: subPiece, isMidSentence: subIndex > 0))
                 }
@@ -278,7 +295,10 @@ extension PocketTtsSynthesizer {
             }
 
             let candidate = existing.text.joined(with: piece.text)
-            if tokenizer.encode(candidate.text).count <= maxTokens {
+            let normalized = normalizeText(
+                candidate.text, isMidSentence: existing.isMidSentence, language: language).text
+            if tokenizer.encode(normalized).count <= preferredMaxTokens
+                && fits(candidate, isMidSentence: existing.isMidSentence) {
                 current = MappedChunk(text: candidate, isMidSentence: existing.isMidSentence)
             } else {
                 chunks.append(existing)
@@ -407,25 +427,32 @@ extension PocketTtsSynthesizer {
     private static func splitMappedOversizedSentence(
         _ text: MappedText,
         tokenizer: SentencePieceTokenizer,
-        maxTokens: Int
+        maxTokens: Int,
+        voiceCachePosition: Int,
+        language: PocketTtsLanguage
     ) -> [MappedText] {
+        func fits(_ candidate: MappedText) -> Bool {
+            fitsTextChunk(
+                candidate.text, tokenizer: tokenizer, maxTokens: maxTokens,
+                voiceCachePosition: voiceCachePosition, language: language)
+        }
         let clauseParts = splitMappedAtClauseBoundaries(text)
         var result: [MappedText] = []
         var currentPart: MappedText?
 
         for part in clauseParts {
             let candidate = currentPart.map { $0.joined(with: part) } ?? part
-            let candidateTokens = tokenizer.encode(candidate.text).count
-
-            if candidateTokens <= maxTokens {
+            if fits(candidate) {
                 currentPart = candidate
             } else {
                 if let currentPart {
                     result.append(currentPart)
                 }
-                if tokenizer.encode(part.text).count > maxTokens {
+                if !fits(part) {
                     result.append(
-                        contentsOf: splitMappedAtWordBoundaries(part, tokenizer: tokenizer, maxTokens: maxTokens))
+                        contentsOf: splitMappedAtWordBoundaries(
+                            part, tokenizer: tokenizer, maxTokens: maxTokens,
+                            voiceCachePosition: voiceCachePosition, language: language))
                     currentPart = nil
                 } else {
                     currentPart = part
@@ -487,7 +514,9 @@ extension PocketTtsSynthesizer {
     private static func splitMappedAtWordBoundaries(
         _ text: MappedText,
         tokenizer: SentencePieceTokenizer,
-        maxTokens: Int
+        maxTokens: Int,
+        voiceCachePosition: Int,
+        language: PocketTtsLanguage
     ) -> [MappedText] {
         let words = splitMappedWords(text)
         guard words.count > 1 else { return [text] }
@@ -497,9 +526,11 @@ extension PocketTtsSynthesizer {
 
         for word in words {
             let candidate = joinMappedWords(currentWords + [word])
-            let tokens = tokenizer.encode(candidate.text).count
+            let fits = fitsTextChunk(
+                candidate.text, tokenizer: tokenizer, maxTokens: maxTokens,
+                voiceCachePosition: voiceCachePosition, language: language)
 
-            if tokens > maxTokens, !currentWords.isEmpty {
+            if !fits, !currentWords.isEmpty {
                 chunks.append(joinMappedWords(currentWords))
                 currentWords = [word]
             } else {
@@ -519,7 +550,7 @@ extension PocketTtsSynthesizer {
         var current: [MappedCharacter] = []
 
         for character in text.characters {
-            if character.character == " " {
+            if character.character.isWhitespace {
                 if current.isEmpty == false {
                     words.append(MappedText(characters: current))
                     current = []

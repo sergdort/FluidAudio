@@ -139,7 +139,10 @@ final class PocketTtsTextPlanTests: XCTestCase {
         let text = "Hi. Results (e.g., fit)."
         let tokenizer = try makeCharacterTokenizer(for: [text])
 
-        let plan = PocketTtsSynthesizer.makeTextPlan(text, tokenizer: tokenizer, maxTokens: 22)
+        // Abbreviation expansion also counts toward the hard ceiling now;
+        // use the preferred target to keep these separate without forcing a split.
+        let plan = PocketTtsSynthesizer.makeTextPlan(
+            text, tokenizer: tokenizer, maxTokens: 40, preferredMaxTokens: 22)
 
         XCTAssertEqual(plan.chunks.map(\.synthesisText), ["Hi.", "Results (e.g., fit)."])
         XCTAssertEqual(
@@ -176,7 +179,45 @@ final class PocketTtsTextPlanTests: XCTestCase {
         XCTAssertTrue(plan.chunks.dropFirst().allSatisfy { $0.isMidSentence })
     }
 
+    func testDefaultPlanKeepsCacheSafeQuotedSentenceWhole() throws {
+        let text = "You hear \"damn you're strong/buff, what's your workout, any advice for me\" enough times "
+            + "and it just seeps into your identity that you are a strong/buff person"
+        let tokenizer = try makeEnglishTokenizer()
+        let plan = PocketTtsSynthesizer.makeTextPlan(text, tokenizer: tokenizer)
+
+        XCTAssertEqual(plan.chunks.count, 1)
+        let chunk = try XCTUnwrap(plan.chunks.first)
+        XCTAssertEqual(chunk.normalizedText, text + ".")
+        XCTAssertEqual(chunk.sourceText, text)
+        XCTAssertEqual(chunk.sourceRange, .init(lowerBound: 0, upperBound: text.utf16.count))
+        XCTAssertFalse(chunk.isMidSentence)
+    }
+
+    func testDefaultPlanSplitsCacheOversizedSentenceAndPreservesSources() throws {
+        let text = Array(repeating: "the weather remains calm across the valley", count: 12).joined(separator: " ")
+        let tokenizer = try makeEnglishTokenizer()
+        let plan = PocketTtsSynthesizer.makeTextPlan(text, tokenizer: tokenizer)
+
+        XCTAssertGreaterThan(plan.chunks.count, 1)
+        XCTAssertFalse(try XCTUnwrap(plan.chunks.first).isMidSentence)
+        XCTAssertTrue(plan.chunks.dropFirst().allSatisfy(\.isMidSentence))
+        XCTAssertEqual(plan.chunks.flatMap(\.words).map(\.sourceText), text.components(separatedBy: " "))
+        for chunk in plan.chunks {
+            XCTAssertEqual(sourceSubstring(in: text, range: chunk.sourceRange), chunk.sourceText)
+            let required = PocketTtsConstants.planningVoiceCachePosition
+                + tokenizer.encode(chunk.normalizedText).count
+                + PocketTtsSynthesizer.estimateRequiredCacheFrames(text: chunk.normalizedText)
+            XCTAssertLessThanOrEqual(required, PocketTtsConstants.kvCacheMaxLen)
+        }
+    }
+
     // MARK: - Helpers
+
+    private func makeEnglishTokenizer() throws -> SentencePieceTokenizer {
+        let url = try XCTUnwrap(Bundle.module.url(
+            forResource: "pocket_tts_english_tokenizer", withExtension: "model"))
+        return try SentencePieceTokenizer(modelData: Data(contentsOf: url))
+    }
 
     private func sourceSubstring(in text: String, range: PocketTtsSourceRange) -> String? {
         guard

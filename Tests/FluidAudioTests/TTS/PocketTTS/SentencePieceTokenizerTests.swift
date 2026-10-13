@@ -108,4 +108,13 @@ final class SentencePieceTokenizerTests: XCTestCase {
         let clean = tokenizer.encode("hello world").count
         XCTAssertEqual(tokenizer.encode("hello world\n").count, clean + 1)
     }
+
+    func testUnknownEdgeCompetesWithLongerPieceWithByteFallback() throws {
+        // The old fork covered this lattice choice too: taking "xy" greedily
+        // would miss the higher-scoring unknown-x + "yz" segmentation.
+        let tokenizer = try SentencePieceTokenizer(modelData: SentencePieceTestModel.data(pieces: [
+            ("\u{2581}", -1), ("xy", -5), ("yz", -1), ("<0x78>", 0), ("<0x7A>", 0),
+        ]))
+        XCTAssertEqual(tokenizer.encode("xyz"), [0, 3, 2])
+    }
 }

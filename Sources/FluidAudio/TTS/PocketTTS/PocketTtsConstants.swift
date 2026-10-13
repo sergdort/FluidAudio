@@ -55,6 +55,11 @@ public enum PocketTtsConstants {
     /// the capacity left by the selected voice and estimated speech duration.
     public static let maxTokensPerChunk: Int = 512
 
+    /// Voice-independent planning budget: shipped English voices use at most
+    /// 148 positions (michael); 160 adds 12 positions of margin. Offline plans
+    /// and live sessions must share this budget so Oratio's chunk identities match.
+    public static let planningVoiceCachePosition: Int = 160
+
     // MARK: - KV cache
 
     /// Max KV cache positions: voice conditioning + text + generated frames.

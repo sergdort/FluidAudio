@@ -143,9 +143,12 @@ public actor PocketTtsSession {
         self.language = language
         let voicePosition = Int(voiceKVSnapshot.positions[0][0].floatValue)
         self.voiceCachePosition = voicePosition
-        self.maxTokensPerChunk = try PocketTtsSynthesizer.effectiveMaxTokensPerChunk(
+        _ = try PocketTtsSynthesizer.effectiveMaxTokensPerChunk(
             requested: maxTokensPerChunk, voiceCachePosition: voicePosition
         )
+        // Preserve the requested planning ceiling; the fixed planning budget
+        // reserves cache space independently of the selected voice.
+        self.maxTokensPerChunk = maxTokensPerChunk
         self.rng = SeededRNG(seed: seed)
         self.stateModels = nil
         self.stateVoiceData = nil
@@ -206,9 +209,10 @@ public actor PocketTtsSession {
         self.language = language
         let voicePosition = PocketTtsSynthesizer.voiceCachePosition(for: voiceData)
         self.voiceCachePosition = voicePosition
-        self.maxTokensPerChunk = try PocketTtsSynthesizer.effectiveMaxTokensPerChunk(
+        _ = try PocketTtsSynthesizer.effectiveMaxTokensPerChunk(
             requested: maxTokensPerChunk, voiceCachePosition: voicePosition
         )
+        self.maxTokensPerChunk = maxTokensPerChunk
         self.rng = SeededRNG(seed: seed)
         self.stateModels = stateModels
         self.stateVoiceData = voiceData
@@ -261,7 +265,10 @@ public actor PocketTtsSession {
 
                 let plan = PocketTtsSynthesizer.makeTextPlan(
                     trimmed, tokenizer: constants.tokenizer,
-                    maxTokens: maxTokensPerChunk, language: language
+                    maxTokens: maxTokensPerChunk,
+                    preferredMaxTokens: PocketTtsConstants.preferredTokensPerChunk,
+                    voiceCachePosition: PocketTtsConstants.planningVoiceCachePosition,
+                    language: language
                 )
                 let chunks = plan.chunks
                 Self.logger.info(
