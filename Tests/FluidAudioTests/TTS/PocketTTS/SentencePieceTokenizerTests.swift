@@ -1,3 +1,7 @@
+// Modified by Serg Dort for Oratio in the sergdort/FluidAudio fork (branch oratio-fork-v2.2), 2026:
+// adds a byte-fallback lattice test.
+// Original work: FluidInference/FluidAudio, Apache License 2.0. See FORK_CHANGES.md.
+
 import Foundation
 import XCTest
 

@@ -1,3 +1,8 @@
+// Modified by Serg Dort for Oratio in the sergdort/FluidAudio fork (branch oratio-fork-v2.2), 2026:
+// adds the `events` stream (text plans, audio frames, estimated highlights), delivers audio
+// through it, and plans text with a voice-independent cache budget.
+// Original work: FluidInference/FluidAudio, Apache License 2.0. See FORK_CHANGES.md.
+
 @preconcurrency import CoreML
 import Foundation
 
